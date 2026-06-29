@@ -3,7 +3,8 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
   const configstoragekey = "minibiaBot.haste.config";
-  const haste_condition_id = 17;
+  // ID 17 = utani hur | ID 14 = utani gran hur
+  const haste_condition_ids = [14, 17];
 
   const config = Object.assign(
     {
@@ -27,9 +28,11 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   function ishasteactive() {
     const player = window.gameClient?.player;
     const conditions = player?.conditions;
-    if (conditions?.__conditions?.has?.(haste_condition_id)) return true;
-    if (conditions?.has?.(haste_condition_id)) return true;
-    if (player?.hasCondition?.(haste_condition_id)) return true;
+    for (const id of haste_condition_ids) {
+      if (conditions?.__conditions?.has?.(id)) return true;
+      if (conditions?.has?.(id)) return true;
+      if (player?.hasCondition?.(id)) return true;
+    }
     return false;
   }
 
@@ -50,10 +53,10 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   }
 
   function trycasthaste() {
-    if (!config.enabled) return false;
+    // Verifica state.running E config.enabled — dupla proteção
+    if (!state.running || !config.enabled) return false;
     const gate = getgatestatus();
     if (!gate.cancast) return false;
-    // Anti-spam mínimo de 1s para não mandar dois packets no mesmo tick
     const now = Date.now();
     if (now - state.lastcastat < 1000) return false;
     const sent = bot.sendChat(config.spellwords);
@@ -69,17 +72,21 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     state.timerid = window.setTimeout(tick, config.tickms);
   }
 
+  function tick() {
+    // Dupla verificação no início do tick
+    if (!state.running || !config.enabled) return;
+    try { trycasthaste(); }
+    catch (e) { bot.log("haste tick error", e?.message || e); }
+    finally {
+      // Só agenda próximo tick se ainda estiver rodando
+      if (state.running && config.enabled) schedulenexttick();
+    }
+  }
+
   function runimmediatetick() {
     if (!state.running) return;
     if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
     tick();
-  }
-
-  function tick() {
-    if (!state.running) return;
-    try { trycasthaste(); }
-    catch (e) { bot.log("haste tick error", e?.message || e); }
-    finally { schedulenexttick(); }
   }
 
   function handleresume() {
@@ -115,10 +122,15 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   }
 
   function stop(opts = {}) {
+    // Para tudo imediatamente
     state.running = false;
-    if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
+    config.enabled = false;
+    if (state.timerid != null) {
+      window.clearTimeout(state.timerid);
+      state.timerid = null;
+    }
     detachresumelisteners();
-    if (opts.persistEnabled !== false) { config.enabled = false; persistconfig(); }
+    if (opts.persistEnabled !== false) { persistconfig(); }
     bot.log("haste stopped");
     return true;
   }
