@@ -7202,7 +7202,8 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
   const configstoragekey = "minibiaBot.haste.config";
-  const haste_condition_id = 17;
+  // ID 17 = utani hur | ID 14 = utani gran hur
+  const haste_condition_ids = [14, 17];
 
   const config = Object.assign(
     {
@@ -7226,12 +7227,11 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   function ishasteactive() {
     const player = window.gameClient?.player;
     const conditions = player?.conditions;
-
-    // Detecta pelo ID 17 (confirmado no servidor)
-    if (conditions?.__conditions?.has?.(haste_condition_id)) return true;
-    if (conditions?.has?.(haste_condition_id)) return true;
-    if (player?.hasCondition?.(haste_condition_id)) return true;
-
+    for (const id of haste_condition_ids) {
+      if (conditions?.__conditions?.has?.(id)) return true;
+      if (conditions?.has?.(id)) return true;
+      if (player?.hasCondition?.(id)) return true;
+    }
     return false;
   }
 
@@ -7241,7 +7241,7 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     return monsters.length > 0;
   }
 
-  function getgatestatus(now = Date.now()) {
+  function getgatestatus() {
     const hasteactive    = ishasteactive();
     const targetonscreen = hasvisibletarget();
     return {
@@ -7251,14 +7251,13 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     };
   }
 
-  function trycasthaste(now = Date.now()) {
-    if (!config.enabled) return false;
-    const gate = getgatestatus(now);
+  function trycasthaste() {
+    // Verifica state.running E config.enabled — dupla proteção
+    if (!state.running || !config.enabled) return false;
+    const gate = getgatestatus();
     if (!gate.cancast) return false;
-
-    // Evita spam: mínimo 1s entre casts mesmo sem cooldown configurado
+    const now = Date.now();
     if (now - state.lastcastat < 1000) return false;
-
     const sent = bot.sendChat(config.spellwords);
     if (sent) {
       state.lastcastat = now;
@@ -7272,17 +7271,21 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     state.timerid = window.setTimeout(tick, config.tickms);
   }
 
+  function tick() {
+    // Dupla verificação no início do tick
+    if (!state.running || !config.enabled) return;
+    try { trycasthaste(); }
+    catch (e) { bot.log("haste tick error", e?.message || e); }
+    finally {
+      // Só agenda próximo tick se ainda estiver rodando
+      if (state.running && config.enabled) schedulenexttick();
+    }
+  }
+
   function runimmediatetick() {
     if (!state.running) return;
     if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
     tick();
-  }
-
-  function tick() {
-    if (!state.running) return;
-    try { trycasthaste(); }
-    catch (e) { bot.log("haste tick error", e?.message || e); }
-    finally { schedulenexttick(); }
   }
 
   function handleresume() {
@@ -7318,10 +7321,15 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   }
 
   function stop(opts = {}) {
+    // Para tudo imediatamente
     state.running = false;
-    if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
+    config.enabled = false;
+    if (state.timerid != null) {
+      window.clearTimeout(state.timerid);
+      state.timerid = null;
+    }
     detachresumelisteners();
-    if (opts.persistEnabled !== false) { config.enabled = false; persistconfig(); }
+    if (opts.persistEnabled !== false) { persistconfig(); }
     bot.log("haste stopped");
     return true;
   }
@@ -8431,7 +8439,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
               <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
               <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
-              <span class="mb-note">Lanca automatico quando speed expirar e sem target na tela.</span>
+              <span class="mb-note">Detecta IDs 14 e 17. Nao lanca com target na tela.</span>
             </div>
           </div>
         </div>
