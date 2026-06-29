@@ -13,6 +13,7 @@
     ["follow",        "minibiaBot.follow.config"],
     ["autoStack",     "minibiaBot.autoStack.config"],
     ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
+    ["haste",     "minibiaBot.haste.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -64,6 +65,7 @@
     currentBundle.installAutoFollowModule(bot);
     currentBundle.installAutoStackModule(bot);
     currentBundle.installAutoRingByCapModule(bot);
+    currentBundle.installastemodule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
@@ -93,6 +95,7 @@
       follow         : bot.follow.status(),
       autoStack      : bot.autoStack.status(),
       autoRingByCap  : bot.autoRingByCap.status(),
+      haste      : bot.haste.status(),
       friendHeal     : bot.friendHeal.status(),
       autoSpell      : bot.autoSpell.status(),
       distanceAttack : bot.distanceAttack.status(),
