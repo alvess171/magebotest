@@ -47,9 +47,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
       waypointTolerance: 2,
       waypointLookahead: 12,
-      strictMode: false,    // Modo estrito inteligente (pula só se estiver mais perto)
-      maxProximitySkip: 3,  // Máximo de waypoints que pode pular se estiver mais perto
-      loopType: "reverse",  // "reverse" = volta ao fim | "restart" = pula pro 1º
+      strictMode: false,    // Modo estrito inteligente
+      loopType: "reverse",  // "reverse" = volta | "restart" = pula pro 1º
+      maxProximitySkip: 3,  // Máximo de waypoints que pode pular por proximidade
       pauseUntilClear: true,
       pauseUntilSpawn: false,
       pauseUntilSpawnFloorOffset: 1,
@@ -847,17 +847,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         index += 1;
       }
       if (index !== state.currentIndex) {
-        if (index >= route.length) { 
-          if (config.loopType === "restart") {
-            state.currentIndex = 0;
-            state.direction = 1;
-            bot.log("cave reached end, restarting from waypoint 1");
-          } else {
-            state.currentIndex = route.length - 1;
-            state.direction = -1;
-            bot.log("cave reached end, reversing direction");
-          }
-        }
+        if (index >= route.length) { state.currentIndex = route.length - 1; state.direction = -1; }
         else { state.currentIndex = index; }
       }
     } else {
@@ -868,62 +858,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         index -= 1;
       }
       if (index !== state.currentIndex) {
-        if (index < 0) { 
-          if (config.loopType === "restart") {
-            state.currentIndex = route.length - 1;
-            state.direction = 1;
-            bot.log("cave reached start, restarting from waypoint " + route.length);
-          } else {
-            state.currentIndex = 0;
-            state.direction = 1;
-          }
-        }
+        if (index < 0) { state.currentIndex = 0; state.direction = 1; }
         else { state.currentIndex = index; }
       }
     }
     const currentWaypoint = getCurrentWaypoint();
     const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
-    
-    // ── MODO ESTRITO INTELIGENTE ────────────────────────────────
-    if (config.strictMode && Number.isFinite(currentDistance)) {
-      const maxSkip = Math.max(1, Number(config.maxProximitySkip) || 3);
-      const searchStart = direction > 0 ? state.currentIndex + 1 : state.currentIndex - 1;
-      const searchEnd = direction > 0 ? Math.min(route.length, state.currentIndex + maxSkip + 1) : Math.max(-1, state.currentIndex - maxSkip - 1);
-      
-      if (direction > 0) {
-        for (let i = searchStart; i < searchEnd; i++) {
-          if (i >= 0 && i < route.length) {
-            const waypoint = route[i];
-            if (!isDelayWaypoint(waypoint)) {
-              const distance = getDistanceToWaypoint(position, waypoint);
-              if (Number.isFinite(distance) && distance < currentDistance) {
-                state.currentIndex = i;
-                resetDelayState();
-                bot.log("cave jumped by proximity", { from: previousIndex + 1, to: state.currentIndex + 1, skipAmount: i - previousIndex, mode: "strict-smart" });
-                return true;
-              }
-            }
-          }
-        }
-      } else {
-        for (let i = searchStart; i > searchEnd; i--) {
-          if (i >= 0 && i < route.length) {
-            const waypoint = route[i];
-            if (!isDelayWaypoint(waypoint)) {
-              const distance = getDistanceToWaypoint(position, waypoint);
-              if (Number.isFinite(distance) && distance < currentDistance) {
-                state.currentIndex = i;
-                resetDelayState();
-                bot.log("cave jumped by proximity", { from: previousIndex + 1, to: state.currentIndex + 1, skipAmount: previousIndex - i, mode: "strict-smart" });
-                return true;
-              }
-            }
-          }
-        }
-      }
-    }
-    // ───────────────────────────────────────────────────────────
-    
     const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
     if (!Number.isFinite(currentDistance)) {
       if (previousIndex !== state.currentIndex) {
@@ -1180,26 +1120,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!route.length) return null;
     if (route.length === 1) return route[0];
     let nextIndex = state.currentIndex + state.direction;
-    if (nextIndex >= route.length) { 
-      if (config.loopType === "restart") {
-        state.direction = 1;
-        nextIndex = 0;
-        bot.log("cave waypoint advanced: reached end, restarting from waypoint 1");
-      } else {
-        state.direction = -1;
-        nextIndex = route.length - 2;
-      }
-    }
-    else if (nextIndex < 0) { 
-      if (config.loopType === "restart") {
-        state.direction = 1;
-        nextIndex = route.length - 1;
-        bot.log("cave waypoint advanced: reached start, restarting from last waypoint");
-      } else {
-        state.direction = 1;
-        nextIndex = 1;
-      }
-    }
+    if (nextIndex >= route.length) { state.direction = -1; nextIndex = route.length - 2; }
+    else if (nextIndex < 0) { state.direction = 1; nextIndex = 1; }
     state.currentIndex = Math.max(0, Math.min(route.length - 1, nextIndex));
     const nextWaypoint = getCurrentWaypoint();
     resetDelayState();
@@ -1425,13 +1347,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("pauseUntilSpawnFloorOffset" in nextConfig) nextConfig.pauseUntilSpawnFloorOffset = normalizeSpawnFloorOffset(nextConfig.pauseUntilSpawnFloorOffset);
     if ("waypointTolerance" in nextConfig) nextConfig.waypointTolerance = Math.max(0, Math.trunc(Number(nextConfig.waypointTolerance) || 0));
     if ("waypointLookahead" in nextConfig) nextConfig.waypointLookahead = Math.max(1, Math.trunc(Number(nextConfig.waypointLookahead) || 12));
-    if ("maxProximitySkip" in nextConfig) nextConfig.maxProximitySkip = Math.max(1, Math.trunc(Number(nextConfig.maxProximitySkip) || 3));
-    if ("strictMode" in nextConfig) nextConfig.strictMode = !!nextConfig.strictMode;
-    if ("loopType" in nextConfig) nextConfig.loopType = (["reverse", "restart"].includes(String(nextConfig.loopType)) ? nextConfig.loopType : "reverse");
     // ── VELOCIDADE: valida tickMs e repathMs sem forçar 500 ─
     if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
     if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
     if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
+    if ("strictMode" in nextConfig) nextConfig.strictMode = !!nextConfig.strictMode;
+    if ("loopType" in nextConfig) nextConfig.loopType = (["reverse", "restart"].includes(String(nextConfig.loopType)) ? nextConfig.loopType : "reverse");
+    if ("maxProximitySkip" in nextConfig) nextConfig.maxProximitySkip = Math.max(1, Math.trunc(Number(nextConfig.maxProximitySkip) || 3));
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
