@@ -52,6 +52,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pauseUntilSpawnFloorOffset: 1,
       enabled: false,
       activePresetName: defaultPresetName,
+      proximitySkipEnabled: false, // pula gravação se já existe WP próximo
+      minProximitySkip: 3,         // distância mínima (sqm Manhattan) entre WPs
     },
     bot.storage.get(configStorageKey, {})
   );
@@ -1260,6 +1262,26 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   function addWaypointCurrentSpot() {
     const position = normalizePosition(bot.getPlayerPosition());
     if (!position) { bot.log("could not read current position for cave waypoint"); return null; }
+
+    // ── Proximity Skip: ativo quando config.proximitySkipEnabled === true ──
+    if (config.proximitySkipEnabled) {
+      const minDist = Math.max(1, Math.trunc(Number(config.minProximitySkip) || 3));
+      for (const wp of route) {
+        if (isDelayWaypoint(wp)) continue;
+        if (wp.z !== position.z) continue; // só compara mesmo andar
+        const dist = getDistance(position, wp);
+        if (Number.isFinite(dist) && dist < minDist) {
+          bot.log("cave waypoint skipped (proximity skip ativo)", {
+            dist,
+            minProximitySkip: minDist,
+            current: position,
+            nearestWp: { x: wp.x, y: wp.y, z: wp.z },
+          });
+          return null;
+        }
+      }
+    }
+
     return addWaypoint(position);
   }
 
@@ -1348,6 +1370,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
     if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
     if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
+    if ("minProximitySkip" in nextConfig) nextConfig.minProximitySkip = Math.max(1, Math.min(20, Math.trunc(Number(nextConfig.minProximitySkip) || 3)));
+    if ("proximitySkipEnabled" in nextConfig) nextConfig.proximitySkipEnabled = !!nextConfig.proximitySkipEnabled;
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
