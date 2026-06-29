@@ -6702,9 +6702,9 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
   const config = Object.assign(
     {
-      tickMs    : 2000,   // intervalo entre varreduras (ms)
-      maxStack  : 100,    // tamanho máximo de stack (Tibia/Minibia = 100)
-      enabled   : false,
+      tickMs   : 2000,
+      maxStack : 100,
+      enabled  : false,
     },
     bot.storage.get(configStorageKey, {})
   );
@@ -6712,42 +6712,58 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
   const state = {
     running  : false,
     timerId  : null,
-    lastRunAt: 0,
-    merged   : 0,       // total de merges feitos na sessão
+    merged   : 0,
   };
 
   function persistConfig() { bot.storage.set(configStorageKey, { ...config }); }
-
-  // ── Helpers ──────────────────────────────────────────────────
 
   function getOpenContainers() {
     return Array.from(window.gameClient?.player?.__openedContainers || []);
   }
 
-  // Retorna todos os slots de todos os containers abertos
-  // cada entry: { container, containerIndex, slotIndex, item }
-  function getAllSlots() {
+  function getFirstContainer() {
+    return getOpenContainers()[0] || null;
+  }
+
+  function getItemDef(item) {
+    if (!item) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
+      window.gameClient?.itemDefinitionsBySid?.[item.sid]            ||
+      window.gameClient?.itemDefinitions?.[item.id]                  ||
+      null
+    );
+  }
+
+  function getItemName(item) {
+    return String(getItemDef(item)?.properties?.name || item?.name || "").toLowerCase();
+  }
+
+  function isRune(item) {
+    if (!item) return false;
+    const def = getItemDef(item);
+    if (def?.properties?.isRune || def?.properties?.rune) return true;
+    return /\brune\b/i.test(getItemName(item));
+  }
+
+  function getRuneSlots() {
     const result = [];
     getOpenContainers().forEach((container, containerIndex) => {
       const slots = container?.slots || [];
       for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
-        const slot = slots[slotIndex];
-        const item = slot?.item;
-        if (!item || !item.id) continue;
+        const item = container.getSlotItem?.(slotIndex) || slots[slotIndex]?.item;
+        if (!item?.id || !isRune(item)) continue;
         result.push({ container, containerIndex, slotIndex, item });
       }
     });
     return result;
   }
 
-  // Chama sendItemMove do mouse — move `count` itens de fromSlot para toSlot
-  function moveItem(fromEntry, toEntry, count) {
+  function moveItem(from, to, count) {
     try {
-      // sendItemMove(from, to, count)
-      // from/to: { which: container, index: slotIndex }
-      gameClient.mouse.sendItemMove(
-        { which: fromEntry.container, index: fromEntry.slotIndex },
-        { which: toEntry.container,   index: toEntry.slotIndex   },
+      window.gameClient.mouse.sendItemMove(
+        { which: from.container, index: from.slotIndex },
+        { which: to.container,   index: to.slotIndex   },
         count
       );
       return true;
@@ -6757,24 +6773,26 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     }
   }
 
-  // ── Lógica principal de agrupamento ──────────────────────────
-  //
-  // Algoritmo:
-  //   1. Agrupa slots pelo item.id
-  //   2. Para cada grupo com mais de 1 slot:
-  //      - Ordena por count DESC (o maior recebe, os menores doam)
-  //      - Percorre os doadores (do menor para o maior)
-  //        e envia itens para o primeiro slot que ainda tem espaço
-  //   3. Retorna quantos merges foram feitos nessa varredura
+  function findEmptySlotInContainer(container) {
+    const slots = container?.slots || [];
+    for (let i = 0; i < slots.length; i++) {
+      const item = container.getSlotItem?.(i) || slots[i]?.item;
+      if (!item?.id) return i;
+    }
+    return -1;
+  }
 
   function runStack() {
-    const slots = getAllSlots();
-    if (!slots.length) return 0;
+    const first = getFirstContainer();
+    if (!first) return 0;
 
-    // Agrupa por item id
+    const runeSlots = getRuneSlots();
+    if (!runeSlots.length) return 0;
+
+    // Agrupa por id (cid/sid/id)
     const byId = new Map();
-    for (const entry of slots) {
-      const id = entry.item.id;
+    for (const entry of runeSlots) {
+      const id = entry.item.cid ?? entry.item.sid ?? entry.item.id;
       if (!byId.has(id)) byId.set(id, []);
       byId.get(id).push(entry);
     }
@@ -6782,50 +6800,50 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     let merges = 0;
 
     for (const [id, group] of byId) {
-      // Só itens stackáveis (count > 1 em qualquer slot, ou mais de 1 slot)
-      const isStackable = group.some(e => e.item.count > 1) || group.length > 1;
-      if (!isStackable || group.length < 2) continue;
+      if (group.length < 2) continue;
 
-      // Ordena: maior count primeiro (receptor), menor por último (doador)
-      group.sort((a, b) => b.item.count - a.item.count);
+      // Doadores: slots fora da primeira bag
+      const donors = group.filter(e => e.container !== first);
+      if (!donors.length) continue;
 
-      // Ponteiro do receptor (começa no slot com mais itens)
-      let receiverIdx = 0;
-
-      for (let donorIdx = group.length - 1; donorIdx > receiverIdx; donorIdx--) {
-        const donor    = group[donorIdx];
-        const receiver = group[receiverIdx];
-
+      for (const donor of donors) {
         if (!donor.item.count || donor.item.count <= 0) continue;
 
-        const space = config.maxStack - receiver.item.count;
-        if (space <= 0) {
-          // Receptor cheio — avança para o próximo
-          receiverIdx++;
-          if (receiverIdx >= donorIdx) break;
-          continue;
+        // Tenta empilhar em slot existente na primeira bag (mesmo id)
+        const firstBagSlots = group
+          .filter(e => e.container === first)
+          .sort((a, b) => b.item.count - a.item.count);
+
+        for (const recv of firstBagSlots) {
+          const space = config.maxStack - (recv.item.count || 0);
+          if (space <= 0) continue;
+          const toMove = Math.min(donor.item.count, space);
+          if (moveItem(donor, recv, toMove)) {
+            donor.item.count -= toMove;
+            recv.item.count  += toMove;
+            merges++;
+            bot.log("autostack rune merged", {
+              id,
+              name   : getItemName(donor.item),
+              count  : toMove,
+              fromSlot: donor.slotIndex,
+              toSlot  : recv.slotIndex,
+            });
+          }
+          if (donor.item.count <= 0) break;
         }
 
-        const toMove = Math.min(donor.item.count, space);
-
-        const ok = moveItem(donor, receiver, toMove);
-        if (ok) {
-          merges++;
-          bot.log("autostack merged", {
-            itemId   : id,
-            count    : toMove,
-            from     : { container: donor.containerIndex,    slot: donor.slotIndex,    before: donor.item.count    },
-            to       : { container: receiver.containerIndex, slot: receiver.slotIndex, before: receiver.item.count },
-          });
-
-          // Atualiza counts localmente para calcular o próximo merge certo
-          receiver.item.count += toMove;
-          donor.item.count    -= toMove;
-
-          // Se receptor ficou cheio, avança
-          if (receiver.item.count >= config.maxStack) {
-            receiverIdx++;
-            if (receiverIdx >= donorIdx) break;
+        // Se ainda sobrou, move para slot vazio na primeira bag
+        if (donor.item.count > 0) {
+          const emptySlot = findEmptySlotInContainer(first);
+          if (emptySlot >= 0) {
+            const fakeRecv = { container: first, slotIndex: emptySlot, item: { count: 0 } };
+            const toMove = Math.min(donor.item.count, config.maxStack);
+            if (moveItem(donor, fakeRecv, toMove)) {
+              donor.item.count -= toMove;
+              merges++;
+              bot.log("autostack rune → slot vazio", { id, toMove, emptySlot });
+            }
           }
         }
       }
@@ -6833,8 +6851,6 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
     return merges;
   }
-
-  // ── Loop ─────────────────────────────────────────────────────
 
   function tick() {
     if (!state.running) return;
@@ -6853,15 +6869,13 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     }
   }
 
-  // ── API pública ───────────────────────────────────────────────
-
   function start(overrides = {}) {
     Object.assign(config, overrides, { enabled: true });
     persistConfig();
     if (state.running) { bot.log("autostack already running"); return false; }
     state.running = true;
     state.merged  = 0;
-    bot.log("autostack started", { ...config });
+    bot.log("autostack started (runas apenas → primeira bag)", { ...config });
     tick();
     return true;
   }
@@ -6874,7 +6888,6 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     return true;
   }
 
-  // Roda uma vez imediatamente sem ligar o loop
   function runOnce() {
     const merged = runStack();
     bot.log("autostack runOnce", { merged });
@@ -6901,6 +6914,285 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
   if (config.enabled) start();
 
   bot.autoStack = { start, stop, runOnce, status, updateConfig, config };
+};
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingByCapModule(bot) {
+
+  const configStorageKey = "minibiaBot.autoRingByCap.config";
+  const originStorageKey = "minibiaBot.autoRingByCap.origin";
+  const RING_SLOT = 8;
+
+  const config = Object.assign(
+    {
+      tickMs         : 1000,
+      equipCooldownMs: 1500,
+      capMin         : 200,
+      capPut         : 300,
+      enabled        : false,
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  const state = {
+    running     : false,
+    timerId     : null,
+    lastActionAt: 0,
+    ringOrigin  : bot.storage.get(originStorageKey, null),
+  };
+
+  function persistConfig() { bot.storage.set(configStorageKey, { ...config }); }
+  function persistOrigin()  { bot.storage.set(originStorageKey, state.ringOrigin); }
+
+  function getEquipment()      { return window.gameClient?.player?.equipment || null; }
+  function getOpenContainers() { return Array.from(window.gameClient?.player?.__openedContainers || []); }
+
+  function getItemDef(item) {
+    if (!item) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
+      window.gameClient?.itemDefinitionsBySid?.[item.sid]            ||
+      window.gameClient?.itemDefinitions?.[item.id]                  ||
+      null
+    );
+  }
+
+  function getItemName(item) {
+    return String(getItemDef(item)?.properties?.name || item?.name || "").toLowerCase();
+  }
+
+  function isRingItem(item) {
+    if (!item) return false;
+    const def  = getItemDef(item);
+    const slot = String(def?.properties?.slotType || def?.properties?.slot || "").toLowerCase();
+    if (slot === "ring") return true;
+    return /\bring\b/i.test(getItemName(item));
+  }
+
+  function getEquippedRing() {
+    return getEquipment()?.getSlotItem?.(RING_SLOT) || null;
+  }
+
+  function getCurrentCap() {
+    return bot.getPlayerSnapshot?.()?.capacity ?? null;
+  }
+
+  function findContainerById(id) {
+    if (id == null) return null;
+    return getOpenContainers().find(c => (c.__containerId ?? c.id) === id) || null;
+  }
+
+  function findRingInContainers() {
+    for (const c of getOpenContainers()) {
+      const slots = c?.slots || [];
+      for (let i = 0; i < slots.length; i++) {
+        const item = c.getSlotItem?.(i) || slots[i]?.item;
+        if (item?.id && isRingItem(item)) {
+          return { container: c, slotIndex: i, item, containerId: c.__containerId ?? c.id };
+        }
+      }
+    }
+    return null;
+  }
+
+  function findEmptySlot(preferContainerId = null) {
+    const containers = getOpenContainers();
+    const ordered = preferContainerId != null
+      ? [
+          ...containers.filter(c => (c.__containerId ?? c.id) === preferContainerId),
+          ...containers.filter(c => (c.__containerId ?? c.id) !== preferContainerId),
+        ]
+      : containers;
+
+    for (const c of ordered) {
+      const slots = c?.slots || [];
+      for (let i = 0; i < slots.length; i++) {
+        const item = c.getSlotItem?.(i) || slots[i]?.item;
+        if (!item?.id) return { container: c, slotIndex: i, containerId: c.__containerId ?? c.id };
+      }
+    }
+    return null;
+  }
+
+  function sendMove(from, to) {
+    try {
+      if (window.ItemMovePacket && typeof window.gameClient?.send === "function") {
+        window.gameClient.send(new ItemMovePacket(from, to, 1));
+        return true;
+      }
+      if (typeof window.gameClient?.mouse?.sendItemMove === "function") {
+        window.gameClient.mouse.sendItemMove(from, to, 1);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      bot.log("autoRingByCap sendMove error", e?.message || e);
+      return false;
+    }
+  }
+
+  function removeRing(now) {
+    const eq   = getEquipment();
+    const ring = getEquippedRing();
+    if (!eq || !ring) return false;
+
+    let destContainer = null;
+    let destSlot      = null;
+
+    // Tenta devolver ao slot original
+    if (state.ringOrigin) {
+      const c = findContainerById(state.ringOrigin.containerId);
+      if (c) {
+        const item = c.getSlotItem?.(state.ringOrigin.slotIndex) || c.slots?.[state.ringOrigin.slotIndex]?.item;
+        if (!item?.id) {
+          destContainer = c;
+          destSlot      = state.ringOrigin.slotIndex;
+        }
+      }
+    }
+
+    // Fallback: primeiro slot vazio disponível (preferindo mesmo container)
+    if (!destContainer) {
+      const empty = findEmptySlot(state.ringOrigin?.containerId);
+      if (!empty) { bot.log("autoRingByCap: sem slot vazio para devolver anel"); return false; }
+      destContainer = empty.container;
+      destSlot      = empty.slotIndex;
+    }
+
+    const ok = sendMove(
+      { which: eq,            index: RING_SLOT },
+      { which: destContainer, index: destSlot  }
+    );
+
+    if (ok) {
+      state.lastActionAt = now;
+      bot.log("autoRingByCap: anel removido (cap baixa)", {
+        cap    : getCurrentCap(),
+        capMin : config.capMin,
+        ring   : getItemName(ring),
+        destSlot,
+      });
+    }
+    return ok;
+  }
+
+  function equipRing(now) {
+    const eq = getEquipment();
+    if (!eq || getEquippedRing()) return false;
+
+    let src = null;
+
+    // Tenta origem salva primeiro
+    if (state.ringOrigin) {
+      const c = findContainerById(state.ringOrigin.containerId);
+      if (c) {
+        const item = c.getSlotItem?.(state.ringOrigin.slotIndex) || c.slots?.[state.ringOrigin.slotIndex]?.item;
+        if (item?.id && isRingItem(item)) {
+          src = { container: c, slotIndex: state.ringOrigin.slotIndex, item, containerId: state.ringOrigin.containerId };
+        }
+      }
+    }
+
+    // Fallback: busca em qualquer container aberto
+    if (!src) src = findRingInContainers();
+    if (!src) { bot.log("autoRingByCap: nenhum anel encontrado nos containers"); return false; }
+
+    // Salva a origem antes de mover
+    state.ringOrigin = { containerId: src.containerId, slotIndex: src.slotIndex };
+    persistOrigin();
+
+    const ok = sendMove(
+      { which: src.container, index: src.slotIndex },
+      { which: eq,            index: RING_SLOT      }
+    );
+
+    if (ok) {
+      state.lastActionAt = now;
+      bot.log("autoRingByCap: anel equipado (cap ok)", {
+        cap           : getCurrentCap(),
+        capPut        : config.capPut,
+        ring          : getItemName(src.item),
+        fromSlot      : src.slotIndex,
+        fromContainerId: src.containerId,
+      });
+    }
+    return ok;
+  }
+
+  function tryManageRing() {
+    if (!config.enabled) return false;
+    const now = Date.now();
+    if (now - state.lastActionAt < config.equipCooldownMs) return false;
+
+    const cap = getCurrentCap();
+    if (cap == null) return false;
+
+    if (cap < config.capMin &&  getEquippedRing()) return removeRing(now);
+    if (cap >= config.capPut && !getEquippedRing()) return equipRing(now);
+    return false;
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try {
+      tryManageRing();
+    } catch (e) {
+      bot.log("autoRingByCap tick error", e?.message || e);
+    } finally {
+      if (state.running) state.timerId = window.setTimeout(tick, config.tickMs);
+    }
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    persistConfig();
+    if (state.running) { bot.log("autoRingByCap already running"); return false; }
+    state.running = true;
+    bot.log("autoRingByCap started", { ...config });
+    tick();
+    return true;
+  }
+
+  function stop(opts = {}) {
+    state.running = false;
+    if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
+    if (opts.persistEnabled !== false) { config.enabled = false; persistConfig(); }
+    bot.log("autoRingByCap stopped");
+    return true;
+  }
+
+  function status() {
+    return {
+      running      : state.running,
+      config       : { ...config },
+      currentCap   : getCurrentCap(),
+      ringEquipped : !!getEquippedRing(),
+      ringOrigin   : state.ringOrigin ? { ...state.ringOrigin } : null,
+      lastActionAt : state.lastActionAt,
+    };
+  }
+
+  function updateConfig(next = {}) {
+    if ("capMin"          in next) next.capMin          = Math.max(0,   Number(next.capMin)          || 0);
+    if ("capPut"          in next) next.capPut          = Math.max(0,   Number(next.capPut)          || 0);
+    if ("equipCooldownMs" in next) next.equipCooldownMs = Math.max(500, Number(next.equipCooldownMs) || 1500);
+    if ("tickMs"          in next) next.tickMs          = Math.max(500, Number(next.tickMs)          || 1000);
+    Object.assign(config, next);
+    persistConfig();
+    bot.log("autoRingByCap config updated", { ...config });
+    return { ...config };
+  }
+
+  function clearOrigin() {
+    state.ringOrigin = null;
+    bot.storage.remove(originStorageKey);
+    bot.log("autoRingByCap: origem do anel limpa");
+  }
+
+  if (config.enabled) start();
+
+  bot.autoRingByCap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
 };
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
@@ -7692,7 +7984,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -7763,6 +8055,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
   function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
     if(t) t.checked=!!s?.running;
@@ -7959,11 +8252,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-equip-ring-enabled" /><span>Auto Equip Ring</span></label>
             </div>
           </div>
-          <div class="mb-group"><span class="mb-group-title">Auto Stack</span>
+          <div class="mb-group"><span class="mb-group-title">Auto Stack (Runas)</span>
             <div class="mb-stack">
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-stack-enabled" /><span>Enable Auto Stack</span></label>
               <div class="mb-row"><span class="mb-field-label">Intervalo (ms)</span><input type="number" id="minibia-bot-auto-stack-tick" min="500" placeholder="2000" style="width:70px" /><button type="button" class="mb-small-button" id="minibia-bot-auto-stack-now">Agrupar agora</button></div>
               <span class="mb-small-note" id="minibia-bot-auto-stack-status">Status: parado</span>
+              <span class="mb-note">Agrupa apenas runas na primeira bag aberta.</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Ring por Cap</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-capring-enabled" /><span>Enable Auto Ring por Cap</span></label>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Tirar anel (cap &lt;)</span><input type="number" id="mb-capring-min" min="0" placeholder="200" /></div>
+                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap &ge;)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-capring-cd" min="500" placeholder="1500" /></div>
+              </div>
+              <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
+              <span class="mb-small-note" id="mb-capring-status">Status: parado</span>
             </div>
           </div>
         </div>
@@ -8254,6 +8560,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autoStack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
     if(asEnabledI){asEnabledI.checked=!!bot.autoStack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autoStack?.start?.({tickMs:t});else bot.autoStack?.stop?.();refreshAutoStackStatus();});}
 
+    // ── Auto Ring por Cap ─────────────────────────────────────────────
+    const capMinI=panel.querySelector("#mb-capring-min");
+    const capPutI=panel.querySelector("#mb-capring-put");
+    const capCdI=panel.querySelector("#mb-capring-cd");
+    const capEnI=panel.querySelector("#mb-capring-enabled");
+    const capClrB=panel.querySelector("#mb-capring-clear-origin");
+    if(capMinI){capMinI.value=String(bot.autoRingByCap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoRingByCap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
+    if(capPutI){capPutI.value=String(bot.autoRingByCap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoRingByCap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
+    if(capCdI){capCdI.value=String(bot.autoRingByCap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoRingByCap?.updateConfig?.({equipCooldownMs:v});});}
+    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
+    if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
+
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
     const manaMinI=panel.querySelector("#minibia-bot-rune-mana-min");
@@ -8427,12 +8745,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshAutoStackStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -8444,7 +8762,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshAutoStackStatus,
+    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
@@ -8465,6 +8783,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
     ["autoStack",     "minibiaBot.autoStack.config"],
+    ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -8515,6 +8834,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
     currentBundle.installAutoStackModule(bot);
+    currentBundle.installAutoRingByCapModule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
@@ -8543,6 +8863,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       talk:           bot.talk.status(),
       follow:         bot.follow.status(),
       autoStack:      bot.autoStack.status(),
+      autoRingByCap:  bot.autoRingByCap.status(),
       friendHeal:     bot.friendHeal.status(),
       autoSpell:      bot.autoSpell.status(),
       distanceAttack:  bot.distanceAttack.status(),
