@@ -935,7 +935,16 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   if (config.enabled) {
     start();
   }
+  
+  
+  // ── HOTKEY ─────────────────────────────────────────────────
+  const hotkeyConfigKey = "minibiaBot.caveHotkey.config";
+  const hotkeyConfig = Object.assign(
+    { stopKey: "Delete", startKey: "Insert", enabled: true },
+    bot.storage.get(hotkeyConfigKey, {})
+  );
 
+  
   bot.addCleanup(() => {
     stop({ persistEnabled: false });
   });
