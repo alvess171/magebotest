@@ -17,6 +17,7 @@ cat \
   src/modules/auto-follow.js \
   src/modules/rune-check.js \
   src/modules/autostack.js \
+  src/modules/auto-ring-by-cap.js \
   src/modules/profiles.js \
   src/ui/panel.js \
   src/main.js \
