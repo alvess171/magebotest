@@ -38,7 +38,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -109,6 +109,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
   function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - haste:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
   function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"💍 equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo • cap ${cap} • ${anel} • ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
@@ -324,6 +325,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </div>
               <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
               <span class="mb-small-note" id="mb-capring-status">Status: parado</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Haste</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
+              <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
+              <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-haste-cd" min="500" placeholder="2000" /></div>
+              <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
+              <span class="mb-note">Lanca haste sem speed e sem target na tela.</span>
             </div>
           </div>
         </div>
@@ -626,6 +636,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
     if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
 
+    // ── Haste ────────────────────────────────────────────
+    const hasteSpellI=panel.querySelector("#mb-haste-spell");
+    const hasteCdI=panel.querySelector("#mb-haste-cd");
+    const hasteEnI=panel.querySelector("#mb-haste-enabled");
+    if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
+    if(hasteCdI){hasteCdI.value=String(bot.haste?.config?.recastcooldownms??2000);hasteCdI.addEventListener("change",()=>{const v=Math.max(500,Number(hasteCdI.value)||2000);hasteCdI.value=String(v);bot.haste?.updateconfig?.({recastcooldownms:v});});}
+    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur",recastcooldownms:Math.max(500,Number(hasteCdI?.value)||2000)});else bot.haste?.stop?.();refreshHasteStatus();});}
+
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
     const manaMinI=panel.querySelector("#minibia-bot-rune-mana-min");
@@ -799,12 +817,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -816,7 +834,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus,
+    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus, refreshHasteStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
