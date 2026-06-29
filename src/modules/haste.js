@@ -3,22 +3,21 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
   const configstoragekey = "minibiaBot.haste.config";
-  const haste_condition_ids = [6, 7, 8];
+  const haste_condition_id = 17;
 
   const config = Object.assign(
     {
-      tickms          : 500,
-      recastcooldownms: 2000,
-      spellwords      : "utani hur",
-      enabled         : false,
+      tickms    : 500,
+      spellwords: "utani hur",
+      enabled   : false,
     },
     bot.storage.get(configstoragekey, {})
   );
 
   const state = {
-    running    : false,
-    timerid    : null,
-    lastcastat : 0,
+    running   : false,
+    timerid   : null,
+    lastcastat: 0,
   };
 
   let resumelistenersattached = false;
@@ -28,27 +27,9 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   function ishasteactive() {
     const player = window.gameClient?.player;
     const conditions = player?.conditions;
-
-    for (const id of haste_condition_ids) {
-      if (conditions?.has?.(id)) return true;
-      if (player?.hasCondition?.(id)) return true;
-    }
-
-    const namedkeys = ["HASTE", "SPEED", "SWIFT", "SWIFTNESS", "UTANI"];
-    for (const key of namedkeys) {
-      const condid = window.ConditionManager?.prototype?.[key];
-      if (condid != null) {
-        if (conditions?.has?.(condid)) return true;
-        if (player?.hasCondition?.(condid)) return true;
-      }
-    }
-
-    const basespeed = player?.baseSpeed ?? player?.state?.baseSpeed ?? null;
-    const currspeed = player?.speed    ?? player?.state?.speed    ?? null;
-    if (basespeed != null && currspeed != null) {
-      return Number(currspeed) > Number(basespeed);
-    }
-
+    if (conditions?.__conditions?.has?.(haste_condition_id)) return true;
+    if (conditions?.has?.(haste_condition_id)) return true;
+    if (player?.hasCondition?.(haste_condition_id)) return true;
     return false;
   }
 
@@ -58,24 +39,23 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     return monsters.length > 0;
   }
 
-  function getgatestatus(now = Date.now()) {
+  function getgatestatus() {
     const hasteactive    = ishasteactive();
     const targetonscreen = hasvisibletarget();
-    const cooldownms     = Math.max(0, config.recastcooldownms - (now - state.lastcastat));
-    const cooldownready  = cooldownms === 0;
     return {
       hasteactive,
       targetonscreen,
-      cooldownready,
-      cooldownremainingms: cooldownms,
-      cancast: !hasteactive && !targetonscreen && cooldownready,
+      cancast: !hasteactive && !targetonscreen,
     };
   }
 
-  function trycasthaste(now = Date.now()) {
+  function trycasthaste() {
     if (!config.enabled) return false;
-    const gate = getgatestatus(now);
+    const gate = getgatestatus();
     if (!gate.cancast) return false;
+    // Anti-spam mínimo de 1s para não mandar dois packets no mesmo tick
+    const now = Date.now();
+    if (now - state.lastcastat < 1000) return false;
     const sent = bot.sendChat(config.spellwords);
     if (sent) {
       state.lastcastat = now;
@@ -145,17 +125,16 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
   function status() {
     return {
-      running    : state.running,
-      config     : { ...config },
-      gates      : getgatestatus(),
-      lastcastat : state.lastcastat,
+      running   : state.running,
+      config    : { ...config },
+      gates     : getgatestatus(),
+      lastcastat: state.lastcastat,
     };
   }
 
   function updateconfig(next = {}) {
-    if ("spellwords"       in next) next.spellwords       = String(next.spellwords || "").trim() || config.spellwords;
-    if ("recastcooldownms" in next) next.recastcooldownms = Math.max(500, Number(next.recastcooldownms) || 2000);
-    if ("tickms"           in next) next.tickms           = Math.max(250, Number(next.tickms) || 500);
+    if ("spellwords" in next) next.spellwords = String(next.spellwords || "").trim() || config.spellwords;
+    if ("tickms"     in next) next.tickms     = Math.max(250, Number(next.tickms) || 500);
     Object.assign(config, next);
     persistconfig();
     bot.log("haste config updated", { ...config });
