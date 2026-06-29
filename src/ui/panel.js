@@ -331,9 +331,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             <div class="mb-stack">
               <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
               <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
-              <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-haste-cd" min="500" placeholder="2000" /></div>
               <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
-              <span class="mb-note">Lanca haste sem speed e sem target na tela.</span>
+              <span class="mb-note">Detecta automatico pelo ID 17. Nao lanca com target na tela.</span>
             </div>
           </div>
         </div>
@@ -638,11 +637,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     // ── Haste ────────────────────────────────────────────
     const hasteSpellI=panel.querySelector("#mb-haste-spell");
-    const hasteCdI=panel.querySelector("#mb-haste-cd");
     const hasteEnI=panel.querySelector("#mb-haste-enabled");
     if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
-    if(hasteCdI){hasteCdI.value=String(bot.haste?.config?.recastcooldownms??2000);hasteCdI.addEventListener("change",()=>{const v=Math.max(500,Number(hasteCdI.value)||2000);hasteCdI.value=String(v);bot.haste?.updateconfig?.({recastcooldownms:v});});}
-    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur",recastcooldownms:Math.max(500,Number(hasteCdI?.value)||2000)});else bot.haste?.stop?.();refreshHasteStatus();});}
+    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur"});else bot.haste?.stop?.();refreshHasteStatus();});}
 
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
