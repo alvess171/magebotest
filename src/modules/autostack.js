@@ -6,9 +6,9 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
   const config = Object.assign(
     {
-      tickMs    : 2000,   // intervalo entre varreduras (ms)
-      maxStack  : 100,    // tamanho máximo de stack (Tibia/Minibia = 100)
-      enabled   : false,
+      tickMs   : 2000,
+      maxStack : 100,
+      enabled  : false,
     },
     bot.storage.get(configStorageKey, {})
   );
@@ -16,42 +16,58 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
   const state = {
     running  : false,
     timerId  : null,
-    lastRunAt: 0,
-    merged   : 0,       // total de merges feitos na sessão
+    merged   : 0,
   };
 
   function persistConfig() { bot.storage.set(configStorageKey, { ...config }); }
-
-  // ── Helpers ──────────────────────────────────────────────────
 
   function getOpenContainers() {
     return Array.from(window.gameClient?.player?.__openedContainers || []);
   }
 
-  // Retorna todos os slots de todos os containers abertos
-  // cada entry: { container, containerIndex, slotIndex, item }
-  function getAllSlots() {
+  function getFirstContainer() {
+    return getOpenContainers()[0] || null;
+  }
+
+  function getItemDef(item) {
+    if (!item) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
+      window.gameClient?.itemDefinitionsBySid?.[item.sid]            ||
+      window.gameClient?.itemDefinitions?.[item.id]                  ||
+      null
+    );
+  }
+
+  function getItemName(item) {
+    return String(getItemDef(item)?.properties?.name || item?.name || "").toLowerCase();
+  }
+
+  function isRune(item) {
+    if (!item) return false;
+    const def = getItemDef(item);
+    if (def?.properties?.isRune || def?.properties?.rune) return true;
+    return /\brune\b/i.test(getItemName(item));
+  }
+
+  function getRuneSlots() {
     const result = [];
     getOpenContainers().forEach((container, containerIndex) => {
       const slots = container?.slots || [];
       for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
-        const slot = slots[slotIndex];
-        const item = slot?.item;
-        if (!item || !item.id) continue;
+        const item = container.getSlotItem?.(slotIndex) || slots[slotIndex]?.item;
+        if (!item?.id || !isRune(item)) continue;
         result.push({ container, containerIndex, slotIndex, item });
       }
     });
     return result;
   }
 
-  // Chama sendItemMove do mouse — move `count` itens de fromSlot para toSlot
-  function moveItem(fromEntry, toEntry, count) {
+  function moveItem(from, to, count) {
     try {
-      // sendItemMove(from, to, count)
-      // from/to: { which: container, index: slotIndex }
-      gameClient.mouse.sendItemMove(
-        { which: fromEntry.container, index: fromEntry.slotIndex },
-        { which: toEntry.container,   index: toEntry.slotIndex   },
+      window.gameClient.mouse.sendItemMove(
+        { which: from.container, index: from.slotIndex },
+        { which: to.container,   index: to.slotIndex   },
         count
       );
       return true;
@@ -61,24 +77,26 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     }
   }
 
-  // ── Lógica principal de agrupamento ──────────────────────────
-  //
-  // Algoritmo:
-  //   1. Agrupa slots pelo item.id
-  //   2. Para cada grupo com mais de 1 slot:
-  //      - Ordena por count DESC (o maior recebe, os menores doam)
-  //      - Percorre os doadores (do menor para o maior)
-  //        e envia itens para o primeiro slot que ainda tem espaço
-  //   3. Retorna quantos merges foram feitos nessa varredura
+  function findEmptySlotInContainer(container) {
+    const slots = container?.slots || [];
+    for (let i = 0; i < slots.length; i++) {
+      const item = container.getSlotItem?.(i) || slots[i]?.item;
+      if (!item?.id) return i;
+    }
+    return -1;
+  }
 
   function runStack() {
-    const slots = getAllSlots();
-    if (!slots.length) return 0;
+    const first = getFirstContainer();
+    if (!first) return 0;
 
-    // Agrupa por item id
+    const runeSlots = getRuneSlots();
+    if (!runeSlots.length) return 0;
+
+    // Agrupa por id (cid/sid/id)
     const byId = new Map();
-    for (const entry of slots) {
-      const id = entry.item.id;
+    for (const entry of runeSlots) {
+      const id = entry.item.cid ?? entry.item.sid ?? entry.item.id;
       if (!byId.has(id)) byId.set(id, []);
       byId.get(id).push(entry);
     }
@@ -86,50 +104,50 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     let merges = 0;
 
     for (const [id, group] of byId) {
-      // Só itens stackáveis (count > 1 em qualquer slot, ou mais de 1 slot)
-      const isStackable = group.some(e => e.item.count > 1) || group.length > 1;
-      if (!isStackable || group.length < 2) continue;
+      if (group.length < 2) continue;
 
-      // Ordena: maior count primeiro (receptor), menor por último (doador)
-      group.sort((a, b) => b.item.count - a.item.count);
+      // Doadores: slots fora da primeira bag
+      const donors = group.filter(e => e.container !== first);
+      if (!donors.length) continue;
 
-      // Ponteiro do receptor (começa no slot com mais itens)
-      let receiverIdx = 0;
-
-      for (let donorIdx = group.length - 1; donorIdx > receiverIdx; donorIdx--) {
-        const donor    = group[donorIdx];
-        const receiver = group[receiverIdx];
-
+      for (const donor of donors) {
         if (!donor.item.count || donor.item.count <= 0) continue;
 
-        const space = config.maxStack - receiver.item.count;
-        if (space <= 0) {
-          // Receptor cheio — avança para o próximo
-          receiverIdx++;
-          if (receiverIdx >= donorIdx) break;
-          continue;
+        // Tenta empilhar em slot existente na primeira bag (mesmo id)
+        const firstBagSlots = group
+          .filter(e => e.container === first)
+          .sort((a, b) => b.item.count - a.item.count);
+
+        for (const recv of firstBagSlots) {
+          const space = config.maxStack - (recv.item.count || 0);
+          if (space <= 0) continue;
+          const toMove = Math.min(donor.item.count, space);
+          if (moveItem(donor, recv, toMove)) {
+            donor.item.count -= toMove;
+            recv.item.count  += toMove;
+            merges++;
+            bot.log("autostack rune merged", {
+              id,
+              name   : getItemName(donor.item),
+              count  : toMove,
+              fromSlot: donor.slotIndex,
+              toSlot  : recv.slotIndex,
+            });
+          }
+          if (donor.item.count <= 0) break;
         }
 
-        const toMove = Math.min(donor.item.count, space);
-
-        const ok = moveItem(donor, receiver, toMove);
-        if (ok) {
-          merges++;
-          bot.log("autostack merged", {
-            itemId   : id,
-            count    : toMove,
-            from     : { container: donor.containerIndex,    slot: donor.slotIndex,    before: donor.item.count    },
-            to       : { container: receiver.containerIndex, slot: receiver.slotIndex, before: receiver.item.count },
-          });
-
-          // Atualiza counts localmente para calcular o próximo merge certo
-          receiver.item.count += toMove;
-          donor.item.count    -= toMove;
-
-          // Se receptor ficou cheio, avança
-          if (receiver.item.count >= config.maxStack) {
-            receiverIdx++;
-            if (receiverIdx >= donorIdx) break;
+        // Se ainda sobrou, move para slot vazio na primeira bag
+        if (donor.item.count > 0) {
+          const emptySlot = findEmptySlotInContainer(first);
+          if (emptySlot >= 0) {
+            const fakeRecv = { container: first, slotIndex: emptySlot, item: { count: 0 } };
+            const toMove = Math.min(donor.item.count, config.maxStack);
+            if (moveItem(donor, fakeRecv, toMove)) {
+              donor.item.count -= toMove;
+              merges++;
+              bot.log("autostack rune → slot vazio", { id, toMove, emptySlot });
+            }
           }
         }
       }
@@ -137,8 +155,6 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
     return merges;
   }
-
-  // ── Loop ─────────────────────────────────────────────────────
 
   function tick() {
     if (!state.running) return;
@@ -157,15 +173,13 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     }
   }
 
-  // ── API pública ───────────────────────────────────────────────
-
   function start(overrides = {}) {
     Object.assign(config, overrides, { enabled: true });
     persistConfig();
     if (state.running) { bot.log("autostack already running"); return false; }
     state.running = true;
     state.merged  = 0;
-    bot.log("autostack started", { ...config });
+    bot.log("autostack started (runas apenas → primeira bag)", { ...config });
     tick();
     return true;
   }
@@ -178,7 +192,6 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     return true;
   }
 
-  // Roda uma vez imediatamente sem ligar o loop
   function runOnce() {
     const merged = runStack();
     bot.log("autostack runOnce", { merged });
