@@ -7195,28 +7195,28 @@ window.__minibiaBotBundle.installautoringbycapModule = function installautoringb
   bot.autoringbycap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
 };
 
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
   const configstoragekey = "minibiaBot.haste.config";
-  const haste_condition_ids = [6, 7, 8];
+  const haste_condition_id = 17;
 
   const config = Object.assign(
     {
-      tickms          : 500,
-      recastcooldownms: 2000,
-      spellwords      : "utani hur",
-      enabled         : false,
+      tickms    : 500,
+      spellwords: "utani hur",
+      enabled   : false,
     },
     bot.storage.get(configstoragekey, {})
   );
 
   const state = {
-    running    : false,
-    timerid    : null,
-    lastcastat : 0,
+    running   : false,
+    timerid   : null,
+    lastcastat: 0,
   };
 
   let resumelistenersattached = false;
@@ -7227,25 +7227,10 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     const player = window.gameClient?.player;
     const conditions = player?.conditions;
 
-    for (const id of haste_condition_ids) {
-      if (conditions?.has?.(id)) return true;
-      if (player?.hasCondition?.(id)) return true;
-    }
-
-    const namedkeys = ["HASTE", "SPEED", "SWIFT", "SWIFTNESS", "UTANI"];
-    for (const key of namedkeys) {
-      const condid = window.ConditionManager?.prototype?.[key];
-      if (condid != null) {
-        if (conditions?.has?.(condid)) return true;
-        if (player?.hasCondition?.(condid)) return true;
-      }
-    }
-
-    const basespeed = player?.baseSpeed ?? player?.state?.baseSpeed ?? null;
-    const currspeed = player?.speed    ?? player?.state?.speed    ?? null;
-    if (basespeed != null && currspeed != null) {
-      return Number(currspeed) > Number(basespeed);
-    }
+    // Detecta pelo ID 17 (confirmado no servidor)
+    if (conditions?.__conditions?.has?.(haste_condition_id)) return true;
+    if (conditions?.has?.(haste_condition_id)) return true;
+    if (player?.hasCondition?.(haste_condition_id)) return true;
 
     return false;
   }
@@ -7259,14 +7244,10 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   function getgatestatus(now = Date.now()) {
     const hasteactive    = ishasteactive();
     const targetonscreen = hasvisibletarget();
-    const cooldownms     = Math.max(0, config.recastcooldownms - (now - state.lastcastat));
-    const cooldownready  = cooldownms === 0;
     return {
       hasteactive,
       targetonscreen,
-      cooldownready,
-      cooldownremainingms: cooldownms,
-      cancast: !hasteactive && !targetonscreen && cooldownready,
+      cancast: !hasteactive && !targetonscreen,
     };
   }
 
@@ -7274,6 +7255,10 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
     if (!config.enabled) return false;
     const gate = getgatestatus(now);
     if (!gate.cancast) return false;
+
+    // Evita spam: mínimo 1s entre casts mesmo sem cooldown configurado
+    if (now - state.lastcastat < 1000) return false;
+
     const sent = bot.sendChat(config.spellwords);
     if (sent) {
       state.lastcastat = now;
@@ -7343,17 +7328,16 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
   function status() {
     return {
-      running    : state.running,
-      config     : { ...config },
-      gates      : getgatestatus(),
-      lastcastat : state.lastcastat,
+      running   : state.running,
+      config    : { ...config },
+      gates     : getgatestatus(),
+      lastcastat: state.lastcastat,
     };
   }
 
   function updateconfig(next = {}) {
-    if ("spellwords"       in next) next.spellwords       = String(next.spellwords || "").trim() || config.spellwords;
-    if ("recastcooldownms" in next) next.recastcooldownms = Math.max(500, Number(next.recastcooldownms) || 2000);
-    if ("tickms"           in next) next.tickms           = Math.max(250, Number(next.tickms) || 500);
+    if ("spellwords" in next) next.spellwords = String(next.spellwords || "").trim() || config.spellwords;
+    if ("tickms"     in next) next.tickms     = Math.max(250, Number(next.tickms) || 500);
     Object.assign(config, next);
     persistconfig();
     bot.log("haste config updated", { ...config });
@@ -7365,7 +7349,6 @@ window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
   bot.haste = { start, stop, status, updateconfig, ishasteactive, hasvisibletarget, trycasthaste, config };
 };
 
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installProfilesModule = function installProfilesModule(bot) {
   const profilesStorageKey = "minibiaBot.profiles.list";
@@ -8225,7 +8208,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
   function refreshautostackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autostack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
-  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - haste:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
+  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - speed:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
   function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoringbycap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
@@ -8447,9 +8430,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             <div class="mb-stack">
               <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
               <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
-              <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-haste-cd" min="500" placeholder="2000" /></div>
               <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
-              <span class="mb-note">Lanca haste sem speed e sem target na tela.</span>
+              <span class="mb-note">Lanca automatico quando speed expirar e sem target na tela.</span>
             </div>
           </div>
         </div>
@@ -8752,13 +8734,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(capClrB){capClrB.addEventListener("click",()=>{bot.autoringbycap?.clearOrigin?.();refreshCapRingStatus();});}
     if(capEnI){capEnI.checked=!!bot.autoringbycap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoringbycap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoringbycap?.stop?.();refreshCapRingStatus();});}
 
-    // ── Haste ────────────────────────────────────────────────────
+    // ── Haste ──────────────────────────────────────────────────
     const hasteSpellI=panel.querySelector("#mb-haste-spell");
-    const hasteCdI=panel.querySelector("#mb-haste-cd");
     const hasteEnI=panel.querySelector("#mb-haste-enabled");
     if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
-    if(hasteCdI){hasteCdI.value=String(bot.haste?.config?.recastcooldownms??2000);hasteCdI.addEventListener("change",()=>{const v=Math.max(500,Number(hasteCdI.value)||2000);hasteCdI.value=String(v);bot.haste?.updateconfig?.({recastcooldownms:v});});}
-    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur",recastcooldownms:Math.max(500,Number(hasteCdI?.value)||2000)});else bot.haste?.stop?.();refreshHasteStatus();});}
+    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur"});else bot.haste?.stop?.();refreshHasteStatus();});}
 
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
