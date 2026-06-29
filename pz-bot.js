@@ -7195,6 +7195,176 @@ window.__minibiaBotBundle.installautoringbycapModule = function installautoringb
   bot.autoringbycap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
 };
 
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
+
+  const configstoragekey = "minibiaBot.haste.config";
+  const haste_condition_ids = [6, 7, 8];
+
+  const config = Object.assign(
+    {
+      tickms          : 500,
+      recastcooldownms: 2000,
+      spellwords      : "utani hur",
+      enabled         : false,
+    },
+    bot.storage.get(configstoragekey, {})
+  );
+
+  const state = {
+    running    : false,
+    timerid    : null,
+    lastcastat : 0,
+  };
+
+  let resumelistenersattached = false;
+
+  function persistconfig() { bot.storage.set(configstoragekey, { ...config }); }
+
+  function ishasteactive() {
+    const player = window.gameClient?.player;
+    const conditions = player?.conditions;
+
+    for (const id of haste_condition_ids) {
+      if (conditions?.has?.(id)) return true;
+      if (player?.hasCondition?.(id)) return true;
+    }
+
+    const namedkeys = ["HASTE", "SPEED", "SWIFT", "SWIFTNESS", "UTANI"];
+    for (const key of namedkeys) {
+      const condid = window.ConditionManager?.prototype?.[key];
+      if (condid != null) {
+        if (conditions?.has?.(condid)) return true;
+        if (player?.hasCondition?.(condid)) return true;
+      }
+    }
+
+    const basespeed = player?.baseSpeed ?? player?.state?.baseSpeed ?? null;
+    const currspeed = player?.speed    ?? player?.state?.speed    ?? null;
+    if (basespeed != null && currspeed != null) {
+      return Number(currspeed) > Number(basespeed);
+    }
+
+    return false;
+  }
+
+  function hasvisibletarget() {
+    if (window.gameClient?.player?.__target) return true;
+    const monsters = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+    return monsters.length > 0;
+  }
+
+  function getgatestatus(now = Date.now()) {
+    const hasteactive    = ishasteactive();
+    const targetonscreen = hasvisibletarget();
+    const cooldownms     = Math.max(0, config.recastcooldownms - (now - state.lastcastat));
+    const cooldownready  = cooldownms === 0;
+    return {
+      hasteactive,
+      targetonscreen,
+      cooldownready,
+      cooldownremainingms: cooldownms,
+      cancast: !hasteactive && !targetonscreen && cooldownready,
+    };
+  }
+
+  function trycasthaste(now = Date.now()) {
+    if (!config.enabled) return false;
+    const gate = getgatestatus(now);
+    if (!gate.cancast) return false;
+    const sent = bot.sendChat(config.spellwords);
+    if (sent) {
+      state.lastcastat = now;
+      bot.log("haste cast", { spell: config.spellwords });
+    }
+    return sent;
+  }
+
+  function schedulenexttick() {
+    if (!state.running) return;
+    state.timerid = window.setTimeout(tick, config.tickms);
+  }
+
+  function runimmediatetick() {
+    if (!state.running) return;
+    if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
+    tick();
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try { trycasthaste(); }
+    catch (e) { bot.log("haste tick error", e?.message || e); }
+    finally { schedulenexttick(); }
+  }
+
+  function handleresume() {
+    if (document.hidden) return;
+    runimmediatetick();
+  }
+
+  function attachresumelisteners() {
+    if (resumelistenersattached) return;
+    document.addEventListener("visibilitychange", handleresume);
+    window.addEventListener("focus", handleresume);
+    window.addEventListener("pageshow", handleresume);
+    resumelistenersattached = true;
+  }
+
+  function detachresumelisteners() {
+    if (!resumelistenersattached) return;
+    document.removeEventListener("visibilitychange", handleresume);
+    window.removeEventListener("focus", handleresume);
+    window.removeEventListener("pageshow", handleresume);
+    resumelistenersattached = false;
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    persistconfig();
+    if (state.running) { bot.log("haste already running"); return false; }
+    state.running = true;
+    attachresumelisteners();
+    bot.log("haste started", { ...config });
+    tick();
+    return true;
+  }
+
+  function stop(opts = {}) {
+    state.running = false;
+    if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
+    detachresumelisteners();
+    if (opts.persistEnabled !== false) { config.enabled = false; persistconfig(); }
+    bot.log("haste stopped");
+    return true;
+  }
+
+  function status() {
+    return {
+      running    : state.running,
+      config     : { ...config },
+      gates      : getgatestatus(),
+      lastcastat : state.lastcastat,
+    };
+  }
+
+  function updateconfig(next = {}) {
+    if ("spellwords"       in next) next.spellwords       = String(next.spellwords || "").trim() || config.spellwords;
+    if ("recastcooldownms" in next) next.recastcooldownms = Math.max(500, Number(next.recastcooldownms) || 2000);
+    if ("tickms"           in next) next.tickms           = Math.max(250, Number(next.tickms) || 500);
+    Object.assign(config, next);
+    persistconfig();
+    bot.log("haste config updated", { ...config });
+    return { ...config };
+  }
+
+  if (config.enabled) start();
+
+  bot.haste = { start, stop, status, updateconfig, ishasteactive, hasvisibletarget, trycasthaste, config };
+};
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installProfilesModule = function installProfilesModule(bot) {
@@ -7984,7 +8154,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autostack.config", "minibiaBot.autoringbycap.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autostack.config", "minibiaBot.autoringbycap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -8055,6 +8225,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
   function refreshautostackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autostack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - haste:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
   function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoringbycap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
@@ -8270,6 +8441,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </div>
               <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
               <span class="mb-small-note" id="mb-capring-status">Status: parado</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Haste</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
+              <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
+              <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-haste-cd" min="500" placeholder="2000" /></div>
+              <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
+              <span class="mb-note">Lanca haste sem speed e sem target na tela.</span>
             </div>
           </div>
         </div>
@@ -8572,6 +8752,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(capClrB){capClrB.addEventListener("click",()=>{bot.autoringbycap?.clearOrigin?.();refreshCapRingStatus();});}
     if(capEnI){capEnI.checked=!!bot.autoringbycap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoringbycap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoringbycap?.stop?.();refreshCapRingStatus();});}
 
+    // ── Haste ────────────────────────────────────────────────────
+    const hasteSpellI=panel.querySelector("#mb-haste-spell");
+    const hasteCdI=panel.querySelector("#mb-haste-cd");
+    const hasteEnI=panel.querySelector("#mb-haste-enabled");
+    if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
+    if(hasteCdI){hasteCdI.value=String(bot.haste?.config?.recastcooldownms??2000);hasteCdI.addEventListener("change",()=>{const v=Math.max(500,Number(hasteCdI.value)||2000);hasteCdI.value=String(v);bot.haste?.updateconfig?.({recastcooldownms:v});});}
+    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur",recastcooldownms:Math.max(500,Number(hasteCdI?.value)||2000)});else bot.haste?.stop?.();refreshHasteStatus();});}
+
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
     const manaMinI=panel.querySelector("#minibia-bot-rune-mana-min");
@@ -8745,12 +8933,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshautostackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshautostackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -8762,7 +8950,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshautostackStatus, refreshCapRingStatus,
+    refreshCaveTransitionStatus, refreshautostackStatus, refreshCapRingStatus, refreshHasteStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
@@ -8784,6 +8972,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["follow",        "minibiaBot.follow.config"],
     ["autostack",     "minibiaBot.autostack.config"],
     ["autoringbycap", "minibiaBot.autoringbycap.config"],
+    ["haste",          "minibiaBot.haste.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -8835,6 +9024,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installAutoFollowModule(bot);
     currentBundle.installautostackModule(bot);
     currentBundle.installautoringbycapModule(bot);
+    currentBundle.installastemodule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
@@ -8864,6 +9054,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       follow:         bot.follow.status(),
       autostack:      bot.autostack.status(),
       autoringbycap:  bot.autoringbycap.status(),
+      haste:          bot.haste.status(),
       friendHeal:     bot.friendHeal.status(),
       autoSpell:      bot.autoSpell.status(),
       distanceAttack:  bot.distanceAttack.status(),
