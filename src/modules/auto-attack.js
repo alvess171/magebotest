@@ -959,3 +959,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     config,
   };
 };
+
+  // ── HOTKEY ─────────────────────────────────────────────────
+  const hotkeyConfigKey = "minibiaBot.autoattackHotkey.config";
+  const hotkeyConfig = Object.assign(
+    { stopKey: "Delete", startKey: "Insert", enabled: true },
+    bot.storage.get(hotkeyConfigKey, {})
+  );
