@@ -6918,10 +6918,10 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingByCapModule(bot) {
+window.__minibiaBotBundle.installautoringbycapModule = function installautoringbycapModule(bot) {
 
-  const configStorageKey = "minibiaBot.autoRingByCap.config";
-  const originStorageKey = "minibiaBot.autoRingByCap.origin";
+  const configStorageKey = "minibiaBot.autoringbycap.config";
+  const originStorageKey = "minibiaBot.autoringbycap.origin";
   const RING_SLOT = 8;
 
   const config = Object.assign(
@@ -7027,7 +7027,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
       }
       return false;
     } catch (e) {
-      bot.log("autoRingByCap sendMove error", e?.message || e);
+      bot.log("autoringbycap sendMove error", e?.message || e);
       return false;
     }
   }
@@ -7055,7 +7055,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     // Fallback: primeiro slot vazio disponível (preferindo mesmo container)
     if (!destContainer) {
       const empty = findEmptySlot(state.ringOrigin?.containerId);
-      if (!empty) { bot.log("autoRingByCap: sem slot vazio para devolver anel"); return false; }
+      if (!empty) { bot.log("autoringbycap: sem slot vazio para devolver anel"); return false; }
       destContainer = empty.container;
       destSlot      = empty.slotIndex;
     }
@@ -7067,7 +7067,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
 
     if (ok) {
       state.lastActionAt = now;
-      bot.log("autoRingByCap: anel removido (cap baixa)", {
+      bot.log("autoringbycap: anel removido (cap baixa)", {
         cap    : getCurrentCap(),
         capMin : config.capMin,
         ring   : getItemName(ring),
@@ -7096,7 +7096,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
 
     // Fallback: busca em qualquer container aberto
     if (!src) src = findRingInContainers();
-    if (!src) { bot.log("autoRingByCap: nenhum anel encontrado nos containers"); return false; }
+    if (!src) { bot.log("autoringbycap: nenhum anel encontrado nos containers"); return false; }
 
     // Salva a origem antes de mover
     state.ringOrigin = { containerId: src.containerId, slotIndex: src.slotIndex };
@@ -7109,7 +7109,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
 
     if (ok) {
       state.lastActionAt = now;
-      bot.log("autoRingByCap: anel equipado (cap ok)", {
+      bot.log("autoringbycap: anel equipado (cap ok)", {
         cap           : getCurrentCap(),
         capPut        : config.capPut,
         ring          : getItemName(src.item),
@@ -7138,7 +7138,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     try {
       tryManageRing();
     } catch (e) {
-      bot.log("autoRingByCap tick error", e?.message || e);
+      bot.log("autoringbycap tick error", e?.message || e);
     } finally {
       if (state.running) state.timerId = window.setTimeout(tick, config.tickMs);
     }
@@ -7147,9 +7147,9 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
   function start(overrides = {}) {
     Object.assign(config, overrides, { enabled: true });
     persistConfig();
-    if (state.running) { bot.log("autoRingByCap already running"); return false; }
+    if (state.running) { bot.log("autoringbycap already running"); return false; }
     state.running = true;
-    bot.log("autoRingByCap started", { ...config });
+    bot.log("autoringbycap started", { ...config });
     tick();
     return true;
   }
@@ -7158,7 +7158,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     state.running = false;
     if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
     if (opts.persistEnabled !== false) { config.enabled = false; persistConfig(); }
-    bot.log("autoRingByCap stopped");
+    bot.log("autoringbycap stopped");
     return true;
   }
 
@@ -7180,19 +7180,19 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     if ("tickMs"          in next) next.tickMs          = Math.max(500, Number(next.tickMs)          || 1000);
     Object.assign(config, next);
     persistConfig();
-    bot.log("autoRingByCap config updated", { ...config });
+    bot.log("autoringbycap config updated", { ...config });
     return { ...config };
   }
 
   function clearOrigin() {
     state.ringOrigin = null;
     bot.storage.remove(originStorageKey);
-    bot.log("autoRingByCap: origem do anel limpa");
+    bot.log("autoringbycap: origem do anel limpa");
   }
 
   if (config.enabled) start();
 
-  bot.autoRingByCap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
+  bot.autoringbycap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
 };
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
@@ -7984,7 +7984,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoringbycap.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -8055,7 +8055,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
   function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
-  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
+  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoringbycap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
     if(t) t.checked=!!s?.running;
@@ -8566,11 +8566,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const capCdI=panel.querySelector("#mb-capring-cd");
     const capEnI=panel.querySelector("#mb-capring-enabled");
     const capClrB=panel.querySelector("#mb-capring-clear-origin");
-    if(capMinI){capMinI.value=String(bot.autoRingByCap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoRingByCap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
-    if(capPutI){capPutI.value=String(bot.autoRingByCap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoRingByCap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
-    if(capCdI){capCdI.value=String(bot.autoRingByCap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoRingByCap?.updateConfig?.({equipCooldownMs:v});});}
-    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
-    if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
+    if(capMinI){capMinI.value=String(bot.autoringbycap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoringbycap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
+    if(capPutI){capPutI.value=String(bot.autoringbycap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoringbycap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
+    if(capCdI){capCdI.value=String(bot.autoringbycap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoringbycap?.updateConfig?.({equipCooldownMs:v});});}
+    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoringbycap?.clearOrigin?.();refreshCapRingStatus();});}
+    if(capEnI){capEnI.checked=!!bot.autoringbycap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoringbycap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoringbycap?.stop?.();refreshCapRingStatus();});}
 
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
@@ -8783,7 +8783,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
     ["autoStack",     "minibiaBot.autoStack.config"],
-    ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
+    ["autoringbycap", "minibiaBot.autoringbycap.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -8834,7 +8834,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
     currentBundle.installAutoStackModule(bot);
-    currentBundle.installAutoRingByCapModule(bot);
+    currentBundle.installautoringbycapModule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
@@ -8863,7 +8863,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       talk:           bot.talk.status(),
       follow:         bot.follow.status(),
       autoStack:      bot.autoStack.status(),
-      autoRingByCap:  bot.autoRingByCap.status(),
+      autoringbycap:  bot.autoringbycap.status(),
       friendHeal:     bot.friendHeal.status(),
       autoSpell:      bot.autoSpell.status(),
       distanceAttack:  bot.distanceAttack.status(),
