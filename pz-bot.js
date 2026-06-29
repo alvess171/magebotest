@@ -1,3 +1,4 @@
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.createBot = function createBot() {
