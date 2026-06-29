@@ -38,7 +38,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -109,6 +109,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
   function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"💍 equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo • cap ${cap} • ${anel} • ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
     if(t) t.checked=!!s?.running;
@@ -305,11 +306,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-equip-ring-enabled" /><span>Auto Equip Ring</span></label>
             </div>
           </div>
-          <div class="mb-group"><span class="mb-group-title">Auto Stack</span>
+          <div class="mb-group"><span class="mb-group-title">Auto Stack (Runas)</span>
             <div class="mb-stack">
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-stack-enabled" /><span>Enable Auto Stack</span></label>
               <div class="mb-row"><span class="mb-field-label">Intervalo (ms)</span><input type="number" id="minibia-bot-auto-stack-tick" min="500" placeholder="2000" style="width:70px" /><button type="button" class="mb-small-button" id="minibia-bot-auto-stack-now">Agrupar agora</button></div>
               <span class="mb-small-note" id="minibia-bot-auto-stack-status">Status: parado</span>
+              <span class="mb-note">Agrupa apenas runas na primeira bag aberta.</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Ring por Cap</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-capring-enabled" /><span>Enable Auto Ring por Cap</span></label>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Tirar anel (cap &lt;)</span><input type="number" id="mb-capring-min" min="0" placeholder="200" /></div>
+                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap ≥)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-capring-cd" min="500" placeholder="1500" /></div>
+              </div>
+              <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
+              <span class="mb-small-note" id="mb-capring-status">Status: parado</span>
             </div>
           </div>
         </div>
@@ -600,6 +614,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autoStack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
     if(asEnabledI){asEnabledI.checked=!!bot.autoStack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autoStack?.start?.({tickMs:t});else bot.autoStack?.stop?.();refreshAutoStackStatus();});}
 
+    // ── Auto Ring por Cap ─────────────────────────────────────
+    const capMinI=panel.querySelector("#mb-capring-min");
+    const capPutI=panel.querySelector("#mb-capring-put");
+    const capCdI=panel.querySelector("#mb-capring-cd");
+    const capEnI=panel.querySelector("#mb-capring-enabled");
+    const capClrB=panel.querySelector("#mb-capring-clear-origin");
+    if(capMinI){capMinI.value=String(bot.autoRingByCap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoRingByCap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
+    if(capPutI){capPutI.value=String(bot.autoRingByCap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoRingByCap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
+    if(capCdI){capCdI.value=String(bot.autoRingByCap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoRingByCap?.updateConfig?.({equipCooldownMs:v});});}
+    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
+    if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
+
     // ── Rune ──────────────────────────────────────────────────
     const spellI=panel.querySelector("#minibia-bot-rune-spell");
     const manaMinI=panel.querySelector("#minibia-bot-rune-mana-min");
@@ -773,12 +799,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshAutoStackStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -790,7 +816,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshAutoStackStatus,
+    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
