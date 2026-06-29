@@ -7398,6 +7398,2330 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     cpsI?.addEventListener("change",()=>{const n=cpsI.value||"";if(!n||n===bot.cave?.getActivePresetName?.())return;bot.cave.loadPreset(n);refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();refreshCaveTransitionStatus();});
     panel.querySelector("#minibia-bot-cave-preset-new")?.addEventListener("click",()=>{const n=window.prompt("Name the new cave preset:");if(n==null)return;if(!bot.cave.createPreset(n))return;refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
     panel.querySelector("#minibia-bot-cave-preset-delete")?.addEventListener("click",()=>{const n=cpsI?.value||"";if(!n)return;if(!bot.cave.deletePreset(n))return;refreshCavePresetControls();refreshCaveStatus();});
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
+  const configStorageKey = "minibiaBot.cave.config";
+  const routeStorageKey = "minibiaBot.cave.route";
+  const transitionStorageKey = "minibiaBot.cave.transitions";
+  const presetStorageKey = "minibiaBot.cave.presets";
+  const defaultPresetName = "Default";
+  const minimapOverlayRootId = "minibia-bot-cave-minimap-overlay";
+  const minimapOverlayStyleId = "minibia-bot-cave-minimap-overlay-style";
+  const ladderItemIds = new Set([1948, 1968]);
+  const ropeNamePattern = /\brope\b/i;
+  const shovelNamePattern = /\bshovel\b/i;
+  const shovelTargetNamePatterns = [
+    /\bstone pile\b/i,
+    /\bloose stone pile\b/i,
+    /\bgravel pile\b/i,
+    /\bdirt pile\b/i,
+  ];
+  const state = {
+    running: false,
+    timerId: null,
+    observerTimerId: null,
+    currentIndex: 0,
+    direction: 1,
+    lastPathAt: 0,
+    lastPositionKey: null,
+    lastProgressAt: 0,
+    lastStairsUseAt: 0,
+    lastObservedPosition: null,
+    pendingTransitionSource: null,
+    pausedForCombat: false,
+    pausedForCreatures: false,
+    pausedForSpawn: false,
+    delayUntil: 0,
+    delayWaypointIndex: null,
+  };
+  const minimapOverlayState = {
+    timerId: null,
+  };
+
+  // ── VELOCIDADE: valores padrão mais agressivos ──────────────
+  const config = Object.assign(
+    {
+      tickMs: 100,          // era 500 — 5x mais rápido
+      repathMs: 400,        // era 1500 — recalcula caminho bem mais rápido
+      observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
+      waypointTolerance: 2,
+      waypointLookahead: 12,
+      strictMode: false,    // Modo estrito inteligente (pula só se estiver mais perto)
+      maxProximitySkip: 3,  // Máximo de waypoints que pode pular se estiver mais perto
+      loopType: "reverse",  // "reverse" = volta ao fim | "restart" = pula pro 1º
+      pauseUntilClear: true,
+      pauseUntilSpawn: false,
+      pauseUntilSpawnFloorOffset: 1,
+      enabled: false,
+      activePresetName: defaultPresetName,
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  // NÃO forçamos mais tickMs=500 — deixamos o valor do config valer
+
+  function normalizePresetName(value) {
+    const normalized = String(value || "").trim().replace(/\s+/g, " ");
+    return normalized || null;
+  }
+
+  function cloneValue(value) {
+    return value ? JSON.parse(JSON.stringify(value)) : null;
+  }
+
+  function normalizePreset(value) {
+    if (!value) return null;
+    const name = normalizePresetName(value.name);
+    if (!name) return null;
+    return {
+      name,
+      route: normalizeRoute(value.route),
+      transitions: normalizeTransitions(value.transitions),
+    };
+  }
+
+  function normalizePresets(value) {
+    const entries = Array.isArray(value) ? value : [];
+    const deduped = new Map();
+    entries.map(normalizePreset).filter(Boolean).forEach((preset) => {
+      deduped.set(preset.name.toLowerCase(), preset);
+    });
+    return Array.from(deduped.values());
+  }
+
+  let route = normalizeRoute(bot.storage.get(routeStorageKey, []));
+  let transitions = normalizeTransitions(bot.storage.get(transitionStorageKey, []));
+  let presets = normalizePresets(bot.storage.get(presetStorageKey, []));
+
+  if (!presets.length && (route.length || transitions.length)) {
+    presets = [{
+      name: defaultPresetName,
+      route: route.map((waypoint) => cloneValue(waypoint)),
+      transitions: transitions.map((transition) => cloneValue(transition)),
+    }];
+  }
+
+  function getPresetNames() {
+    return presets.map((preset) => preset.name);
+  }
+
+  function getPresetByName(name) {
+    const normalizedName = normalizePresetName(name);
+    if (!normalizedName) return null;
+    return presets.find((preset) => preset.name.toLowerCase() === normalizedName.toLowerCase()) || null;
+  }
+
+  function getActivePresetName() {
+    const configuredName = normalizePresetName(config.activePresetName);
+    if (configuredName && getPresetByName(configuredName)) {
+      return getPresetByName(configuredName).name;
+    }
+    if (presets.length) return presets[0].name;
+    return configuredName || defaultPresetName;
+  }
+
+  function persistPresets() {
+    bot.storage.set(
+      presetStorageKey,
+      presets.map((preset) => ({
+        name: preset.name,
+        route: preset.route.map((waypoint) => ({ ...waypoint })),
+        transitions: preset.transitions.map((transition) => cloneValue(transition)),
+      }))
+    );
+  }
+
+  function persistLegacyActivePreset() {
+    bot.storage.set(routeStorageKey, route.map((waypoint) => ({ ...waypoint })));
+    bot.storage.set(transitionStorageKey, transitions.map((transition) => cloneValue(transition)));
+  }
+
+  function setActivePresetName(name) {
+    config.activePresetName = normalizePresetName(name) || defaultPresetName;
+    persistConfig();
+    return config.activePresetName;
+  }
+
+  function upsertPreset(name, nextRoute = route, nextTransitions = transitions) {
+    const normalizedName = normalizePresetName(name);
+    if (!normalizedName) return null;
+    const preset = {
+      name: normalizedName,
+      route: normalizeRoute(nextRoute).map((waypoint) => cloneValue(waypoint)),
+      transitions: normalizeTransitions(nextTransitions).map((transition) => cloneValue(transition)),
+    };
+    const existingIndex = presets.findIndex((entry) => entry.name.toLowerCase() === normalizedName.toLowerCase());
+    if (existingIndex >= 0) {
+      presets[existingIndex] = preset;
+    } else {
+      presets.push(preset);
+    }
+    persistPresets();
+    return preset;
+  }
+
+  function persistActivePreset() {
+    upsertPreset(getActivePresetName(), route, transitions);
+    persistLegacyActivePreset();
+  }
+
+  function loadPresetState(name) {
+    const preset = getPresetByName(name);
+    if (!preset) return null;
+    route = normalizeRoute(preset.route);
+    transitions = normalizeTransitions(preset.transitions);
+    state.currentIndex = 0;
+    state.direction = 1;
+    state.pendingTransitionSource = null;
+    setActivePresetName(preset.name);
+    persistLegacyActivePreset();
+    return preset;
+  }
+
+  const initialActivePreset = getActivePresetName();
+  if (loadPresetState(initialActivePreset)) {
+    config.activePresetName = initialActivePreset;
+  } else {
+    setActivePresetName(initialActivePreset);
+  }
+
+  function persistConfig() {
+    bot.storage.set(configStorageKey, { ...config });
+  }
+
+  function persistRoute() {
+    persistActivePreset();
+  }
+
+  function normalizePosition(value) {
+    if (!value) return null;
+    const x = Number(value.x);
+    const y = Number(value.y);
+    const z = Number(value.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+    return { x: Math.trunc(x), y: Math.trunc(y), z: Math.trunc(z) };
+  }
+
+  function normalizeWaypoint(waypoint) {
+    if (!waypoint) return null;
+    const type = String(waypoint.type || "").trim().toLowerCase();
+    if (type === "delay") {
+      const seconds = Math.max(1, Math.trunc(Number(waypoint.seconds)));
+      if (!Number.isFinite(seconds) || seconds <= 0) return null;
+      return { type: "delay", seconds };
+    }
+    const position = normalizePosition(waypoint);
+    if (!position) return null;
+    return { type: "position", ...position };
+  }
+
+  function normalizeRoute(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(normalizeWaypoint).filter(Boolean);
+  }
+
+  function normalizeTransition(transition) {
+    if (!transition) return null;
+    const from = normalizePosition(transition.from || transition);
+    const to = normalizePosition(transition.to || {
+      x: transition.targetX,
+      y: transition.targetY,
+      z: transition.targetZ,
+    });
+    if (!from || !to || from.z === to.z) return null;
+    const count = Math.max(1, Math.trunc(Number(transition.count) || 1));
+    const lastSeenAt = Math.max(0, Math.trunc(Number(transition.lastSeenAt) || Date.now()));
+    return { from, to, count, lastSeenAt };
+  }
+
+  function normalizeTransitions(value) {
+    if (!Array.isArray(value)) return [];
+    const deduped = new Map();
+    value.map(normalizeTransition).filter(Boolean).forEach((transition) => {
+      deduped.set(getPositionKey(transition.from), transition);
+    });
+    return Array.from(deduped.values());
+  }
+
+  function getRoute() {
+    return route.map((waypoint) => cloneValue(waypoint));
+  }
+
+  function getTransitions() {
+    return transitions.map((transition) => cloneValue(transition));
+  }
+
+  function persistTransitions() {
+    persistActivePreset();
+  }
+
+  function savePreset(name, options = {}) {
+    const preset = upsertPreset(name, route, transitions);
+    if (!preset) { bot.log("cave preset name is required"); return null; }
+    if (options.activate !== false) {
+      setActivePresetName(preset.name);
+      persistLegacyActivePreset();
+    }
+    bot.log("cave preset saved", { name: preset.name, waypoints: preset.route.length, transitions: preset.transitions.length });
+    return {
+      name: preset.name,
+      route: preset.route.map((waypoint) => cloneValue(waypoint)),
+      transitions: preset.transitions.map((transition) => cloneValue(transition)),
+    };
+  }
+
+  function createPreset(name) {
+    const normalizedName = normalizePresetName(name);
+    if (!normalizedName) { bot.log("cave preset name is required"); return null; }
+    if (getPresetByName(normalizedName)) { bot.log("cave preset already exists", { name: normalizedName }); return null; }
+    if (state.running) stop();
+    const preset = upsertPreset(normalizedName, [], []);
+    if (!preset) return null;
+    loadPresetState(preset.name);
+    bot.log("cave preset created", { name: preset.name });
+    return { name: preset.name, route: [], transitions: [] };
+  }
+
+  function loadPreset(name) {
+    const preset = getPresetByName(name);
+    if (!preset) { bot.log("cave preset not found", { name }); return null; }
+    if (state.running) stop();
+    loadPresetState(preset.name);
+    bot.log("cave preset loaded", { name: preset.name, waypoints: route.length, transitions: transitions.length });
+    return { name: preset.name, route: getRoute(), transitions: getTransitions() };
+  }
+
+  function deletePreset(name) {
+    const preset = getPresetByName(name);
+    if (!preset) { bot.log("cave preset not found", { name }); return false; }
+    presets = presets.filter((entry) => entry.name.toLowerCase() !== preset.name.toLowerCase());
+    persistPresets();
+    if (preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
+      const fallbackPreset = presets[0] || null;
+      if (state.running) stop();
+      if (fallbackPreset) {
+        loadPresetState(fallbackPreset.name);
+      } else {
+        route = [];
+        transitions = [];
+        state.currentIndex = 0;
+        state.direction = 1;
+        state.pendingTransitionSource = null;
+        setActivePresetName(defaultPresetName);
+        persistLegacyActivePreset();
+      }
+    }
+    bot.log("cave preset deleted", { name: preset.name });
+    return true;
+  }
+
+  function exportPresets() {
+    return {
+      version: 1,
+      activePresetName: getActivePresetName(),
+      presets: presets.map((preset) => ({
+        name: preset.name,
+        route: preset.route.map((waypoint) => cloneValue(waypoint)),
+        transitions: preset.transitions.map((transition) => cloneValue(transition)),
+      })),
+    };
+  }
+
+  function importPresets(value) {
+    let parsed = value;
+    if (typeof value === "string") {
+      try { parsed = JSON.parse(value); }
+      catch (error) { bot.log("cave preset import failed: invalid JSON", error?.message || error); return null; }
+    }
+    const payload = parsed && typeof parsed === "object" ? parsed : null;
+    const importedPresets = normalizePresets(payload?.presets || payload);
+    if (!importedPresets.length) { bot.log("cave preset import failed: no valid presets found"); return null; }
+    if (state.running) stop();
+    presets = importedPresets;
+    persistPresets();
+    const requestedActiveName = normalizePresetName(payload?.activePresetName);
+    const targetActivePreset = getPresetByName(requestedActiveName) || presets[0];
+    if (targetActivePreset) loadPresetState(targetActivePreset.name);
+    bot.log("cave presets imported", { presets: presets.length, activePresetName: getActivePresetName() });
+    return exportPresets();
+  }
+
+  function getCurrentWaypoint() {
+    if (!route.length) return null;
+    if (state.currentIndex < 0 || state.currentIndex >= route.length) state.currentIndex = 0;
+    return route[state.currentIndex] || null;
+  }
+
+  function isDelayWaypoint(waypoint) {
+    return !!waypoint && waypoint.type === "delay";
+  }
+
+  function getNearbyCreatures() {
+    const targetNames = bot.attack?.config?.targetNames;
+    const hasTargetFilter = Array.isArray(targetNames) && targetNames.length > 0;
+    if (!hasTargetFilter) return [];
+    return bot.attack?.getNearbyMonsters?.() || [];
+  }
+
+  function hasNearbyCreatures() {
+    return getNearbyCreatures().length > 0;
+  }
+
+  function shouldPauseForCreatures() {
+    return !!config.pauseUntilClear && hasNearbyCreatures();
+  }
+
+  function getAttackTargetNames() {
+    const targetNames = bot.attack?.config?.targetNames;
+    if (!Array.isArray(targetNames)) return [];
+    const deduped = new Map();
+    targetNames.forEach((name) => {
+      const normalized = String(name || "").trim();
+      if (!normalized) return;
+      deduped.set(normalized.toLowerCase(), normalized);
+    });
+    return Array.from(deduped.values());
+  }
+
+  function normalizeSpawnFloorOffset(value) {
+    if (!Number.isFinite(Number(value))) return 0;
+    return Math.trunc(Number(value));
+  }
+
+  function getSpawnWatchFloor(position = normalizePosition(bot.getPlayerPosition())) {
+    if (!position) return null;
+    return position.z - normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset);
+  }
+
+  function isTargetMonster(creature, targetNames) {
+    const name = String(creature?.name || "").trim().toLowerCase();
+    if (!name) return false;
+    return targetNames.some((targetName) => targetName.toLowerCase() === name);
+  }
+
+  function getSpawnFloorMonsters(position = normalizePosition(bot.getPlayerPosition())) {
+    const targetNames = getAttackTargetNames();
+    const targetFloor = getSpawnWatchFloor(position);
+    if (!targetNames.length || targetFloor == null) return [];
+    return (bot.xray?.getVisibleMonsters?.() || []).filter((creature) => {
+      const creatureFloor = Number(creature?.__position?.z ?? creature?.getPosition?.()?.z);
+      if (!Number.isFinite(creatureFloor) || creatureFloor !== targetFloor) return false;
+      return isTargetMonster(creature, targetNames);
+    });
+  }
+
+  function hasSpawnFloorMonster(position = normalizePosition(bot.getPlayerPosition())) {
+    return getSpawnFloorMonsters(position).length > 0;
+  }
+
+  function getSpawnWaitWaypointIndex() {
+    const index = route.findIndex((entry) => !isDelayWaypoint(entry));
+    return index >= 0 ? index : 0;
+  }
+
+  function isSpawnWaitWaypoint(waypoint, index = state.currentIndex) {
+    return index === getSpawnWaitWaypointIndex() && !!waypoint && !isDelayWaypoint(waypoint);
+  }
+
+  function shouldPauseForSpawn(position, waypoint) {
+    if (!config.pauseUntilSpawn || !getAttackTargetNames().length) return false;
+    if (!isSpawnWaitWaypoint(waypoint)) return false;
+    if (hasSpawnFloorMonster(position)) return false;
+    return isAtWaypoint(position, waypoint);
+  }
+
+  function resetDelayState() {
+    state.delayUntil = 0;
+    state.delayWaypointIndex = null;
+  }
+
+  function getPositionKey(position) {
+    return position ? `${position.x},${position.y},${position.z}` : null;
+  }
+
+  function getDistance(from, to) {
+    if (!from || !to || isDelayWaypoint(from) || isDelayWaypoint(to) || Number(from.z) !== Number(to.z)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Math.abs(Number(from.x) - Number(to.x)) + Math.abs(Number(from.y) - Number(to.y));
+  }
+
+  function isBesideOrSameTile(from, to) {
+    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
+    return Math.abs(Number(from.x) - Number(to.x)) <= 1 && Math.abs(Number(from.y) - Number(to.y)) <= 1;
+  }
+
+  function isAdjacentTile(from, to) {
+    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
+    const dx = Math.abs(Number(from.x) - Number(to.x));
+    const dy = Math.abs(Number(from.y) - Number(to.y));
+    return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
+  }
+
+  function getDistanceToWaypoint(position, waypoint) {
+    if (!position || !waypoint || isDelayWaypoint(waypoint)) return null;
+    return getDistance(position, waypoint);
+  }
+
+  function isSameTile(a, b) {
+    if (!a || !b) return false;
+    return Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y) && Number(a.z) === Number(b.z);
+  }
+
+  function getWaypointLookahead() {
+    const value = Number(config.waypointLookahead);
+    if (!Number.isFinite(value) || value < 1) return 12;
+    return Math.trunc(value);
+  }
+
+  function findClosestWaypointIndex(position) {
+    if (!position || !route.length) return 0;
+    const tolerance = getWaypointTolerance();
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    route.forEach((waypoint, index) => {
+      if (isDelayWaypoint(waypoint)) return;
+      const distance = getDistanceToWaypoint(position, waypoint);
+      if (!Number.isFinite(distance)) return;
+      if (distance < bestDistance) { bestDistance = distance; bestIndex = index; return; }
+      if (distance <= bestDistance + tolerance && index < bestIndex) { bestIndex = index; bestDistance = distance; }
+    });
+    if (Number.isFinite(bestDistance)) return bestIndex;
+    const firstPositionIndex = route.findIndex((waypoint) => !isDelayWaypoint(waypoint));
+    return firstPositionIndex >= 0 ? firstPositionIndex : 0;
+  }
+
+  function findAheadWaypointIndex(position, fromIndex, direction) {
+    const startIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(fromIndex) || 0)));
+    const lookahead = getWaypointLookahead();
+    let bestIndex = startIndex;
+    let bestDistance = getDistanceToWaypoint(position, route[startIndex]);
+    if (direction > 0) {
+      const limit = Math.min(route.length - 1, startIndex + lookahead);
+      for (let index = startIndex + 1; index <= limit; index += 1) {
+        if (isDelayWaypoint(route[index])) continue;
+        const distance = getDistanceToWaypoint(position, route[index]);
+        if (!Number.isFinite(distance)) continue;
+        if (!Number.isFinite(bestDistance) || distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+      }
+      return bestIndex;
+    }
+    const limit = Math.max(0, startIndex - lookahead);
+    for (let index = startIndex - 1; index >= limit; index -= 1) {
+      if (isDelayWaypoint(route[index])) continue;
+      const distance = getDistanceToWaypoint(position, route[index]);
+      if (!Number.isFinite(distance)) continue;
+      if (!Number.isFinite(bestDistance) || distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+    }
+    return bestIndex;
+  }
+
+  function getTileAt(position) {
+    if (!position) return null;
+    return window.gameClient?.world?.getTileFromWorldPosition?.(
+      new Position(position.x, position.y, position.z)
+    ) || null;
+  }
+
+  function getTilePosition(tile) {
+    return normalizePosition(tile?.__position);
+  }
+
+  function getThingDefinition(itemId) {
+    if (!itemId) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[itemId] ||
+      window.gameClient?.itemDefinitionsBySid?.[itemId] ||
+      window.gameClient?.itemDefinitions?.[itemId] ||
+      null
+    );
+  }
+
+  function getThingName(thing) {
+    const definition = getThingDefinition(thing?.id);
+    return String(definition?.properties?.name || thing?.name || "").trim().toLowerCase();
+  }
+
+  function isLadderThing(thing) {
+    if (!thing?.id) return false;
+    if (ladderItemIds.has(Number(thing.id))) return true;
+    return getThingName(thing).includes("ladder");
+  }
+
+  function isFloorChangeThing(thing) {
+    const definition = getThingDefinition(thing?.id);
+    return !!definition?.properties?.floorchange || isLadderThing(thing);
+  }
+
+  function isFloorChangeTile(tile) {
+    const tilePosition = getTilePosition(tile);
+    if (!tilePosition) return false;
+    if (isFloorChangeThing(tile)) return true;
+    return Array.isArray(tile.items) && tile.items.some((item) => isFloorChangeThing(item));
+  }
+
+  function getTileThings(tile) {
+    if (!tile) return [];
+    const things = [];
+    if (tile.id) things.push(tile);
+    if (Array.isArray(tile.items)) tile.items.forEach((item) => { if (item) things.push(item); });
+    return things;
+  }
+
+  function tileHasNamedThing(tile, needle) {
+    const value = String(needle || "").trim().toLowerCase();
+    if (!value) return false;
+    return getTileThings(tile).some((thing) => getThingName(thing).includes(value));
+  }
+
+  function isLadderTile(tile) { return getTileThings(tile).some((thing) => isLadderThing(thing)); }
+  function isStairsTile(tile) { return tileHasNamedThing(tile, "stairs"); }
+  function isHoleTile(tile) { return tileHasNamedThing(tile, "hole"); }
+  function isRopeSpotTile(tile) { return tileHasNamedThing(tile, "rope spot"); }
+  function isRopeTargetTile(tile) { return isHoleTile(tile) || isRopeSpotTile(tile); }
+
+  function isShovelTargetThing(thing) {
+    const name = getThingName(thing);
+    if (!name) return false;
+    return shovelTargetNamePatterns.some((pattern) => pattern.test(name));
+  }
+
+  function isShovelTargetTile(tile) {
+    return getTileThings(tile).some((thing) => isShovelTargetThing(thing));
+  }
+
+  function isTransitionCandidateTile(tile, waypoint, position) {
+    if (!tile) return false;
+    if (isFloorChangeTile(tile)) return true;
+    const hasWaypointDelta = waypoint && position && Number.isFinite(waypoint.z) && Number.isFinite(position.z);
+    if (!hasWaypointDelta) return false;
+    if (waypoint.z > position.z) return isShovelTargetTile(tile);
+    if (waypoint.z < position.z) return isRopeTargetTile(tile);
+    return false;
+  }
+
+  function getFloorChangeTileBias(tile, position, waypoint) {
+    if (!tile || !position || !waypoint || position.z === waypoint.z) return 0;
+    const goingDown = waypoint.z > position.z;
+    const goingUp = waypoint.z < position.z;
+    if (goingDown) {
+      if (isLadderTile(tile)) return -30;
+      if (isHoleTile(tile)) return -20;
+      if (isStairsTile(tile)) return 25;
+    }
+    if (goingUp) {
+      if (isStairsTile(tile)) return -20;
+      if (isHoleTile(tile)) return 20;
+    }
+    return 0;
+  }
+
+  function getLoadedTiles() {
+    const chunks = window.gameClient?.world?.chunks || [];
+    const tiles = [];
+    for (const chunk of chunks) {
+      if (!chunk?.tiles) continue;
+      for (const tile of chunk.tiles) {
+        if (tile?.__position) tiles.push(tile);
+      }
+    }
+    return tiles;
+  }
+
+  function ensureMinimapOverlayStyle() {
+    if (document.getElementById(minimapOverlayStyleId)) return;
+    const style = document.createElement("style");
+    style.id = minimapOverlayStyleId;
+    style.textContent = `
+      #${minimapOverlayRootId} { position: fixed; inset: 0; pointer-events: none; z-index: 999997; }
+      #${minimapOverlayRootId} canvas { position: fixed; pointer-events: none; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function ensureMinimapOverlayRoot() {
+    let root = document.getElementById(minimapOverlayRootId);
+    if (root) return root;
+    root = document.createElement("div");
+    root.id = minimapOverlayRootId;
+    root.innerHTML = '<canvas></canvas>';
+    document.body.appendChild(root);
+    return root;
+  }
+
+  function destroyMinimapOverlayElements() {
+    document.getElementById(minimapOverlayRootId)?.remove();
+    document.getElementById(minimapOverlayStyleId)?.remove();
+  }
+
+  function getMinimapCanvas() {
+    return window.gameClient?.renderer?.minimap?.minimap?.canvas || document.getElementById("minimap") || null;
+  }
+
+  function getMinimapViewport() {
+    const canvas = getMinimapCanvas();
+    if (!(canvas instanceof HTMLCanvasElement)) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return { canvas, rect };
+  }
+
+  function getWaypointCanvasPoint(waypoint, viewport, playerPosition, minimap) {
+    if (!waypoint || !viewport || !playerPosition || !minimap) return null;
+    if (isDelayWaypoint(waypoint)) return null;
+    if (waypoint.z !== minimap.__renderLayer) return null;
+    const zoomScale = 1 << (Number(minimap.__zoomLevel) || 0);
+    const center = minimap.center || { x: 0, y: 0 };
+    const internalWidth = Number(viewport.canvas.width) || 160;
+    const internalHeight = Number(viewport.canvas.height) || 160;
+    const internalX = (internalWidth / 2) + (waypoint.x - playerPosition.x - Number(center.x || 0)) * zoomScale;
+    const internalY = (internalHeight / 2) + (waypoint.y - playerPosition.y - Number(center.y || 0)) * zoomScale;
+    return {
+      x: internalX * (viewport.rect.width / internalWidth),
+      y: internalY * (viewport.rect.height / internalHeight),
+    };
+  }
+
+  function renderMinimapOverlay() {
+    const viewport = getMinimapViewport();
+    const minimap = window.gameClient?.renderer?.minimap;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const root = ensureMinimapOverlayRoot();
+    const canvas = root.querySelector("canvas");
+    if (!(canvas instanceof HTMLCanvasElement)) return;
+    if (!viewport || !minimap || !playerPosition || !route.length) {
+      canvas.width = 0; canvas.height = 0; return;
+    }
+    const rect = viewport.rect;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
+    const pixelWidth = Math.round(width * dpr);
+    const pixelHeight = Math.round(height * dpr);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth; canvas.height = pixelHeight;
+    }
+    canvas.style.left = `${Math.round(rect.left)}px`;
+    canvas.style.top = `${Math.round(rect.top)}px`;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const visibleWaypoints = route
+      .map((waypoint, index) => ({ waypoint, index, point: getWaypointCanvasPoint(waypoint, viewport, playerPosition, minimap) }))
+      .filter((entry) => entry.point);
+    if (!visibleWaypoints.length) return;
+    context.save();
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    for (let index = 1; index < visibleWaypoints.length; index += 1) {
+      const previous = visibleWaypoints[index - 1];
+      const current = visibleWaypoints[index];
+      if (current.index !== previous.index + 1) continue;
+      context.strokeStyle = "rgba(92, 228, 196, 0.7)";
+      context.lineWidth = 2;
+      context.beginPath();
+      context.moveTo(previous.point.x, previous.point.y);
+      context.lineTo(current.point.x, current.point.y);
+      context.stroke();
+    }
+    visibleWaypoints.forEach(({ point, index }) => {
+      const isCurrent = state.running && index === state.currentIndex;
+      const radius = isCurrent ? 7 : 5;
+      context.fillStyle = isCurrent ? "#ffcf5a" : "#2bd1c4";
+      context.strokeStyle = isCurrent ? "#6a2400" : "#083f49";
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+      context.fillStyle = "#ffffff";
+      context.font = "bold 11px Verdana, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(String(index + 1), point.x, point.y);
+    });
+    context.restore();
+  }
+
+  function startMinimapOverlay() {
+    if (minimapOverlayState.timerId != null) return;
+    ensureMinimapOverlayStyle();
+    renderMinimapOverlay();
+    minimapOverlayState.timerId = window.setInterval(renderMinimapOverlay, 250);
+  }
+
+  function stopMinimapOverlay() {
+    if (minimapOverlayState.timerId != null) {
+      window.clearInterval(minimapOverlayState.timerId);
+      minimapOverlayState.timerId = null;
+    }
+    destroyMinimapOverlayElements();
+  }
+
+  function getNearbyTransitionTiles(position, waypoint, radius = 8) {
+    if (!position) return [];
+    return getLoadedTiles()
+      .map((tile) => ({ tile, position: getTilePosition(tile) }))
+      .filter((entry) =>
+        entry.position &&
+        entry.position.z === position.z &&
+        Math.abs(entry.position.x - position.x) <= radius &&
+        Math.abs(entry.position.y - position.y) <= radius &&
+        isTransitionCandidateTile(entry.tile, waypoint, position)
+      );
+  }
+
+  function findTransitionTileNearPosition(position, waypoint, radius = 1) {
+    if (!position) return null;
+    let best = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
+      const distance = getDistance(position, entry.position);
+      if (!Number.isFinite(distance)) return;
+      if (distance < bestDistance) { bestDistance = distance; best = entry; }
+    });
+    return best;
+  }
+
+  function findBestKnownTransition(position, waypoint) {
+    if (!position || !waypoint) return null;
+    let best = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    transitions.forEach((transition) => {
+      if (transition.from.z !== position.z || transition.to.z !== waypoint.z) return;
+      const playerDistance = getDistance(position, transition.from);
+      const landingDistance = getDistance(transition.to, waypoint);
+      if (!Number.isFinite(playerDistance) || !Number.isFinite(landingDistance)) return;
+      const score = playerDistance * 10 + landingDistance;
+      if (score < bestScore) { bestScore = score; best = transition; }
+    });
+    return best;
+  }
+
+  function findNearbyTransitionTile(position, waypoint) {
+    if (!position || !waypoint) return null;
+    const waypointDistance = Math.abs(position.x - waypoint.x) + Math.abs(position.y - waypoint.y);
+    const radius = Math.max(4, Math.min(20, waypointDistance + 2));
+    let best = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
+      const playerDistance = getDistance(position, entry.position);
+      const tileToWaypointDistance = Math.abs(entry.position.x - waypoint.x) + Math.abs(entry.position.y - waypoint.y);
+      const score = playerDistance * 10 + tileToWaypointDistance + getFloorChangeTileBias(entry.tile, position, waypoint);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { tile: entry.tile, position: entry.position, playerDistance, waypointDistance: tileToWaypointDistance };
+      }
+    });
+    return best;
+  }
+
+  function getWaypointTolerance() {
+    const value = Number(config.waypointTolerance);
+    if (!Number.isFinite(value) || value < 0) return 2;
+    return Math.trunc(value);
+  }
+
+  function findNextPositionIndex(startIndex, direction = 1) {
+    let index = Math.trunc(Number(startIndex) || 0);
+    while (index >= 0 && index < route.length) {
+      if (!isDelayWaypoint(route[index])) return index;
+      index += direction;
+    }
+    return Math.max(0, Math.min(route.length - 1, Math.trunc(Number(startIndex) || 0)));
+  }
+
+  function syncWaypointProgress(position) {
+    if (!position || !route.length) return false;
+    const previousIndex = state.currentIndex;
+    const direction = state.direction >= 0 ? 1 : -1;
+    if (direction > 0) {
+      let index = state.currentIndex;
+      while (index < route.length) {
+        const waypoint = route[index];
+        if (isDelayWaypoint(waypoint) || !isAtWaypoint(position, waypoint)) break;
+        index += 1;
+      }
+      if (index !== state.currentIndex) {
+        if (index >= route.length) { 
+          if (config.loopType === "restart") {
+            state.currentIndex = 0;
+            state.direction = 1;
+            bot.log("cave reached end, restarting from waypoint 1");
+          } else {
+            state.currentIndex = route.length - 1;
+            state.direction = -1;
+            bot.log("cave reached end, reversing direction");
+          }
+        }
+        else { state.currentIndex = index; }
+      }
+    } else {
+      let index = state.currentIndex;
+      while (index >= 0) {
+        const waypoint = route[index];
+        if (isDelayWaypoint(waypoint) || !isAtWaypoint(position, waypoint)) break;
+        index -= 1;
+      }
+      if (index !== state.currentIndex) {
+        if (index < 0) { 
+          if (config.loopType === "restart") {
+            state.currentIndex = route.length - 1;
+            state.direction = 1;
+            bot.log("cave reached start, restarting from waypoint " + route.length);
+          } else {
+            state.currentIndex = 0;
+            state.direction = 1;
+          }
+        }
+        else { state.currentIndex = index; }
+      }
+    }
+    const currentWaypoint = getCurrentWaypoint();
+    const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
+    
+    // ── MODO ESTRITO INTELIGENTE ────────────────────────────────
+    if (config.strictMode && Number.isFinite(currentDistance)) {
+      const maxSkip = Math.max(1, Number(config.maxProximitySkip) || 3);
+      const searchStart = direction > 0 ? state.currentIndex + 1 : state.currentIndex - 1;
+      const searchEnd = direction > 0 ? Math.min(route.length, state.currentIndex + maxSkip + 1) : Math.max(-1, state.currentIndex - maxSkip - 1);
+      
+      if (direction > 0) {
+        for (let i = searchStart; i < searchEnd; i++) {
+          if (i >= 0 && i < route.length) {
+            const waypoint = route[i];
+            if (!isDelayWaypoint(waypoint)) {
+              const distance = getDistanceToWaypoint(position, waypoint);
+              if (Number.isFinite(distance) && distance < currentDistance) {
+                state.currentIndex = i;
+                resetDelayState();
+                bot.log("cave jumped by proximity", { from: previousIndex + 1, to: state.currentIndex + 1, skipAmount: i - previousIndex, mode: "strict-smart" });
+                return true;
+              }
+            }
+          }
+        }
+      } else {
+        for (let i = searchStart; i > searchEnd; i--) {
+          if (i >= 0 && i < route.length) {
+            const waypoint = route[i];
+            if (!isDelayWaypoint(waypoint)) {
+              const distance = getDistanceToWaypoint(position, waypoint);
+              if (Number.isFinite(distance) && distance < currentDistance) {
+                state.currentIndex = i;
+                resetDelayState();
+                bot.log("cave jumped by proximity", { from: previousIndex + 1, to: state.currentIndex + 1, skipAmount: previousIndex - i, mode: "strict-smart" });
+                return true;
+              }
+            }
+          }
+        }
+      }
+    }
+    // ───────────────────────────────────────────────────────────
+    
+    const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
+    if (!Number.isFinite(currentDistance)) {
+      if (previousIndex !== state.currentIndex) {
+        resetDelayState();
+        bot.log("cave synced waypoint progress", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, direction: state.direction, waypoint: getCurrentWaypoint() });
+        return true;
+      }
+      return false;
+    }
+    if (direction > 0 && aheadIndex > state.currentIndex) {
+      const aheadWaypoint = route[aheadIndex];
+      const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
+      if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
+        let nextIndex = findNextPositionIndex(aheadIndex, 1);
+        if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
+          const afterAhead = aheadIndex + 1;
+          if (afterAhead < route.length) nextIndex = findNextPositionIndex(afterAhead, 1);
+        } else {
+          const afterIndex = aheadIndex + 1;
+          if (afterIndex < route.length) {
+            const afterWaypoint = route[afterIndex];
+            const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
+            if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, 1);
+          }
+        }
+        if (nextIndex > state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
+      }
+    } else if (direction < 0 && aheadIndex < state.currentIndex) {
+      const aheadWaypoint = route[aheadIndex];
+      const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
+      if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
+        let nextIndex = findNextPositionIndex(aheadIndex, -1);
+        if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
+          const afterAhead = aheadIndex - 1;
+          if (afterAhead >= 0) nextIndex = findNextPositionIndex(afterAhead, -1);
+        } else {
+          const afterIndex = aheadIndex - 1;
+          if (afterIndex >= 0) {
+            const afterWaypoint = route[afterIndex];
+            const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
+            if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, -1);
+          }
+        }
+        if (nextIndex < state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
+      }
+    }
+    if (previousIndex !== state.currentIndex) {
+      bot.log("cave synced waypoint progress", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, direction: state.direction, aheadWaypoint: aheadIndex + 1, waypoint: getCurrentWaypoint() });
+      return true;
+    }
+    return false;
+  }
+
+  function isAtWaypoint(position, waypoint) {
+    const distance = getDistanceToWaypoint(position, waypoint);
+    if (!Number.isFinite(distance)) return false;
+    return distance <= getWaypointTolerance();
+  }
+
+  function goToWaypoint(waypoint) {
+    const from = bot.getPlayerPosition();
+    if (!from || !waypoint || isDelayWaypoint(waypoint)) return false;
+    const to = new Position(waypoint.x, waypoint.y, waypoint.z);
+    try {
+      window.gameClient?.world?.pathfinder?.findPath?.(from, to);
+      state.lastPathAt = Date.now();
+      bot.log("cave pathing to waypoint", { ...waypoint, index: state.currentIndex + 1, total: route.length });
+      return true;
+    } catch (error) {
+      bot.log("cave pathing failed", { ...waypoint, error: error?.message || error });
+      return false;
+    }
+  }
+
+  function goToPosition(position) {
+    if (!position) return false;
+    return goToWaypoint(position);
+  }
+
+  function markPendingTransitionSource(source) {
+    const normalized = normalizePosition(source);
+    if (!normalized) return;
+    state.pendingTransitionSource = { ...normalized, at: Date.now() };
+  }
+
+  function upsertTransition(from, to) {
+    const normalizedFrom = normalizePosition(from);
+    const normalizedTo = normalizePosition(to);
+    if (!normalizedFrom || !normalizedTo || normalizedFrom.z === normalizedTo.z) return null;
+    const key = getPositionKey(normalizedFrom);
+    const index = transitions.findIndex((transition) => getPositionKey(transition.from) === key);
+    const next = {
+      from: normalizedFrom,
+      to: normalizedTo,
+      count: index >= 0 ? transitions[index].count + 1 : 1,
+      lastSeenAt: Date.now(),
+    };
+    if (index >= 0) { transitions[index] = next; } else { transitions.push(next); }
+    persistTransitions();
+    bot.log("cave learned floor transition", next);
+    return cloneValue(next);
+  }
+
+  function resolveObservedTransitionSource(previousPosition) {
+    const pending = normalizePosition(state.pendingTransitionSource);
+    if (pending && pending.z === previousPosition.z) return pending;
+    const currentTile = getTileAt(previousPosition);
+    if (currentTile && isFloorChangeTile(currentTile)) return previousPosition;
+    const nearby = findTransitionTileNearPosition(previousPosition, null, 1);
+    if (nearby?.position) return nearby.position;
+    return null;
+  }
+
+  function observePosition() {
+    const current = normalizePosition(bot.getPlayerPosition());
+    if (!current) return;
+    const previous = state.lastObservedPosition;
+    if (previous && !isSameTile(previous, current) && previous.z !== current.z) {
+      const source = resolveObservedTransitionSource(previous);
+      if (source) upsertTransition(source, current);
+      state.pendingTransitionSource = null;
+    }
+    state.lastObservedPosition = current;
+  }
+
+  function getEquipment() { return window.gameClient?.player?.equipment || null; }
+  function getOpenContainers() { return Array.from(window.gameClient?.player?.__openedContainers || []); }
+
+  function findAdjacentWalkablePosition(targetPosition, playerPosition) {
+    if (!targetPosition || !playerPosition) return null;
+    const offsets = [
+      { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
+      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
+    ];
+    offsets.sort((a, b) => {
+      const da = Math.abs(targetPosition.x + a.x - playerPosition.x) + Math.abs(targetPosition.y + a.y - playerPosition.y);
+      const db = Math.abs(targetPosition.x + b.x - playerPosition.x) + Math.abs(targetPosition.y + b.y - playerPosition.y);
+      return da - db;
+    });
+    for (const offset of offsets) {
+      const position = new Position(targetPosition.x + offset.x, targetPosition.y + offset.y, targetPosition.z);
+      const tile = window.gameClient?.world?.getTileFromWorldPosition?.(position);
+      if (tile?.isWalkable?.()) return normalizePosition(position);
+    }
+    return null;
+  }
+
+  function isRopeItem(item) { const name = getThingName(item); return !!name && ropeNamePattern.test(name); }
+  function isShovelItem(item) { const name = getThingName(item); return !!name && shovelNamePattern.test(name); }
+
+  function findToolSource(predicate) {
+    const equipment = getEquipment();
+    if (equipment?.slots) {
+      for (let slotIndex = 0; slotIndex < equipment.slots.length; slotIndex += 1) {
+        const item = equipment.getSlotItem?.(slotIndex);
+        if (predicate(item)) return { which: equipment, index: slotIndex, item, location: "equipment" };
+      }
+    }
+    for (const container of getOpenContainers()) {
+      const slots = container?.slots || [];
+      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+        const item = container.getSlotItem?.(slotIndex);
+        if (predicate(item)) return { which: container, index: slotIndex, item, location: "container" };
+      }
+    }
+    return null;
+  }
+
+  function findRopeSource() { return findToolSource(isRopeItem); }
+  function findShovelSource() { return findToolSource(isShovelItem); }
+
+  function useToolOnTile(tool, targetTile, targetPosition, actionLabel, now = Date.now()) {
+    if (!tool || !targetTile || !targetPosition) return false;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    if (!playerPosition) return false;
+    if (!isAdjacentTile(playerPosition, targetPosition)) {
+      const adjacentPosition = findAdjacentWalkablePosition(targetPosition, playerPosition);
+      if (adjacentPosition) return goToPosition(adjacentPosition);
+    }
+    window.gameClient?.mouse?.__handleItemUseWith?.(
+      { which: tool.which, index: tool.index },
+      { which: targetTile, index: 0xFF }
+    );
+    state.lastStairsUseAt = now;
+    state.lastPathAt = now;
+    markPendingTransitionSource(targetPosition);
+    bot.log(actionLabel, { source: targetPosition, toolLocation: tool.location, toolSlot: tool.index, toolName: getThingName(tool.item) });
+    return true;
+  }
+
+  function useRopeOnTile(targetTile, targetPosition, now = Date.now()) {
+    return useToolOnTile(findRopeSource(), targetTile, targetPosition, "cave roped transition tile", now);
+  }
+
+  function useShovelOnTile(targetTile, targetPosition, now = Date.now()) {
+    return useToolOnTile(findShovelSource(), targetTile, targetPosition, "cave shoveled transition tile", now);
+  }
+
+  function useFloorChangeTile(target, waypoint, now = Date.now()) {
+    const position = normalizePosition(bot.getPlayerPosition());
+    const targetPosition = normalizePosition(target?.position);
+    const targetTile = target?.tile || (targetPosition ? getTileAt(targetPosition) : null);
+    if (!position || !targetPosition || !targetTile) return false;
+    if (now - state.lastStairsUseAt < 1200) return true;
+    if (waypoint?.z < position.z && isRopeTargetTile(targetTile)) return useRopeOnTile(targetTile, targetPosition, now);
+    if (!isFloorChangeTile(targetTile)) {
+      if (waypoint?.z > position.z && isShovelTargetTile(targetTile)) return useShovelOnTile(targetTile, targetPosition, now);
+      return false;
+    }
+    if (isLadderTile(targetTile)) {
+      window.gameClient?.mouse?.use?.({ which: targetTile, index: 0xFF });
+      state.lastStairsUseAt = now;
+      state.lastPathAt = now;
+      markPendingTransitionSource(targetPosition);
+      bot.log("cave used ladder tile", { source: targetPosition, targetZ: waypoint?.z ?? null });
+      return true;
+    }
+    if (!isSameTile(position, targetPosition)) return goToPosition(targetPosition);
+    const currentTile = getTileAt(position);
+    if (!currentTile || !isFloorChangeTile(currentTile)) return false;
+    window.gameClient?.mouse?.use?.({ which: currentTile, index: 0xFF });
+    state.lastStairsUseAt = now;
+    state.lastPathAt = now;
+    markPendingTransitionSource(position);
+    bot.log("cave used floor-change tile", { source: position, targetZ: waypoint?.z ?? null });
+    return true;
+  }
+
+  function handleFloorChange(waypoint, now = Date.now()) {
+    const position = normalizePosition(bot.getPlayerPosition());
+    if (!position || !waypoint || position.z === waypoint.z) return false;
+    const visibleCandidate = findNearbyTransitionTile(position, waypoint);
+    if (visibleCandidate) {
+      const moved = useFloorChangeTile(visibleCandidate, waypoint, now);
+      if (moved) {
+        bot.log("cave probing visible floor-change tile", { tileX: visibleCandidate.position.x, tileY: visibleCandidate.position.y, tileZ: visibleCandidate.position.z, targetZ: waypoint.z });
+        return true;
+      }
+    }
+    const knownTransition = findBestKnownTransition(position, waypoint);
+    if (knownTransition) {
+      const target = { tile: getTileAt(knownTransition.from), position: knownTransition.from };
+      const moved = useFloorChangeTile(target, waypoint, now);
+      if (moved) {
+        bot.log("cave using learned floor transition", { from: knownTransition.from, to: knownTransition.to, waypoint });
+        return true;
+      }
+      bot.log("cave learned transition unavailable, falling back to live scan", { from: knownTransition.from, to: knownTransition.to, waypoint });
+    }
+    return false;
+  }
+
+  function advanceWaypoint() {
+    if (!route.length) return null;
+    if (route.length === 1) return route[0];
+    let nextIndex = state.currentIndex + state.direction;
+    if (nextIndex >= route.length) { 
+      if (config.loopType === "restart") {
+        state.direction = 1;
+        nextIndex = 0;
+        bot.log("cave waypoint advanced: reached end, restarting from waypoint 1");
+      } else {
+        state.direction = -1;
+        nextIndex = route.length - 2;
+      }
+    }
+    else if (nextIndex < 0) { 
+      if (config.loopType === "restart") {
+        state.direction = 1;
+        nextIndex = route.length - 1;
+        bot.log("cave waypoint advanced: reached start, restarting from last waypoint");
+      } else {
+        state.direction = 1;
+        nextIndex = 1;
+      }
+    }
+    state.currentIndex = Math.max(0, Math.min(route.length - 1, nextIndex));
+    const nextWaypoint = getCurrentWaypoint();
+    resetDelayState();
+    bot.log("cave advanced waypoint", { index: state.currentIndex + 1, total: route.length, direction: state.direction, waypoint: nextWaypoint });
+    return nextWaypoint;
+  }
+
+  function scheduleNextTick() {
+    if (!state.running) return;
+    state.timerId = window.setTimeout(tick, config.tickMs);
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try {
+      observePosition();
+      if (!route.length) { stop(); return; }
+      const position = normalizePosition(bot.getPlayerPosition());
+      const positionKey = getPositionKey(position);
+      const now = Date.now();
+      const attackStatus = bot.attack?.status?.() || null;
+      const shouldPauseForCombat = !!attackStatus?.combatActive && Number(attackStatus?.combatDurationMs || 0) < 60000;
+      if (shouldPauseForCombat) {
+        if (!state.pausedForCombat) { state.pausedForCombat = true; bot.log("cave paused for auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
+        return;
+      }
+      if (state.pausedForCombat) { state.pausedForCombat = false; bot.log("cave resumed after auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
+      if (shouldPauseForCreatures()) {
+        if (!state.pausedForCreatures) { state.pausedForCreatures = true; const nearby = getNearbyCreatures(); bot.log("cave paused until area clear", { creatureCount: nearby.length, creatures: nearby.map((c) => c.name || "Mob") }); }
+        return;
+      }
+      if (state.pausedForCreatures) { state.pausedForCreatures = false; bot.log("cave resumed after area clear"); }
+      let waypoint = getCurrentWaypoint();
+      if (!waypoint) { stop(); return; }
+      if (shouldPauseForSpawn(position, waypoint)) {
+        if (!state.pausedForSpawn) { state.pausedForSpawn = true; bot.log("cave paused until target monster spawns", { floorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset), watchFloor: getSpawnWatchFloor(position), targetNames: getAttackTargetNames() }); }
+        return;
+      }
+      if (state.pausedForSpawn) {
+        state.pausedForSpawn = false;
+        if (hasSpawnFloorMonster(position)) { const spawned = getSpawnFloorMonsters(position); bot.log("cave resumed after target monster spawned", { floorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset), watchFloor: getSpawnWatchFloor(position), creatures: spawned.map((c) => c.name || "Mob") }); }
+      }
+      syncWaypointProgress(position);
+      waypoint = getCurrentWaypoint();
+      if (!waypoint) { stop(); return; }
+      if (positionKey && positionKey !== state.lastPositionKey) { state.lastPositionKey = positionKey; state.lastProgressAt = now; }
+      if (isDelayWaypoint(waypoint)) {
+        if (state.delayWaypointIndex !== state.currentIndex || !state.delayUntil) {
+          state.delayWaypointIndex = state.currentIndex;
+          state.delayUntil = now + (Math.max(1, Number(waypoint.seconds) || 1) * 1000);
+          bot.log("cave delay started", { index: state.currentIndex + 1, total: route.length, seconds: Math.max(1, Number(waypoint.seconds) || 1) });
+        }
+        if (now < state.delayUntil) return;
+        bot.log("cave delay completed", { index: state.currentIndex + 1, total: route.length });
+        waypoint = advanceWaypoint();
+        if (!waypoint) return;
+      }
+      if (isAtWaypoint(position, waypoint) && !isDelayWaypoint(waypoint)) { waypoint = advanceWaypoint(); }
+      if (!waypoint) return;
+      if (position && waypoint.z !== position.z) { handleFloorChange(waypoint, now); return; }
+
+      // ── VELOCIDADE: repath mais agressivo ──────────────────
+      const shouldRepath =
+        now - state.lastPathAt >= config.repathMs ||
+        !state.lastProgressAt ||
+        now - state.lastProgressAt >= config.repathMs;
+
+      if (shouldRepath) goToWaypoint(waypoint);
+
+    } catch (error) {
+      bot.log("cave tick failed", error?.message || error);
+    } finally {
+      scheduleNextTick();
+    }
+  }
+
+  function startObserver() {
+    if (state.observerTimerId != null) return;
+    // ── VELOCIDADE: observer a cada 50ms (era 200ms) ────────
+    state.observerTimerId = window.setInterval(() => {
+      try { observePosition(); }
+      catch (error) { bot.log("cave observer failed", error?.message || error); }
+    }, config.observerMs);
+  }
+
+  function stopObserver() {
+    if (state.observerTimerId == null) return;
+    window.clearInterval(state.observerTimerId);
+    state.observerTimerId = null;
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    // ── NÃO forçamos tickMs=500 aqui ────────────────────────
+    persistConfig();
+    if (!route.length) { bot.log("cave bot cannot start without waypoints"); return false; }
+    const hasPositionWaypoint = route.some((waypoint) => !isDelayWaypoint(waypoint));
+    if (!hasPositionWaypoint) { bot.log("cave bot cannot start without position waypoints"); return false; }
+    if (state.running) { bot.log("cave bot already running"); return false; }
+    const position = normalizePosition(bot.getPlayerPosition());
+    state.running = true;
+    state.currentIndex = findClosestWaypointIndex(position);
+    state.direction = state.currentIndex >= route.length - 1 ? -1 : 1;
+    if (route.length <= 1) state.direction = 1;
+    state.lastPathAt = 0;
+    state.lastPositionKey = getPositionKey(position);
+    state.lastProgressAt = Date.now();
+    state.pausedForCombat = false;
+    state.pausedForCreatures = false;
+    state.pausedForSpawn = false;
+    resetDelayState();
+    bot.log("cave bot started", { waypoints: route.length, currentIndex: state.currentIndex + 1, direction: state.direction, waypoint: getCurrentWaypoint(), tickMs: config.tickMs, repathMs: config.repathMs, observerMs: config.observerMs });
+    tick();
+    return true;
+  }
+
+  function stop(options = {}) {
+    const shouldPersistEnabled = options.persistEnabled !== false;
+    state.running = false;
+    if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
+    if (shouldPersistEnabled) { config.enabled = false; persistConfig(); }
+    state.pausedForCombat = false;
+    state.pausedForCreatures = false;
+    state.pausedForSpawn = false;
+    resetDelayState();
+    bot.log("cave bot stopped");
+    return true;
+  }
+
+  function addWaypoint(waypoint) {
+    const normalized = normalizeWaypoint(waypoint);
+    if (!normalized) return null;
+    route.push(normalized);
+    persistRoute();
+    bot.log("cave waypoint added", { ...normalized, total: route.length });
+    return cloneValue(normalized);
+  }
+
+  function addWaypointCurrentSpot() {
+    const position = normalizePosition(bot.getPlayerPosition());
+    if (!position) { bot.log("could not read current position for cave waypoint"); return null; }
+    return addWaypoint(position);
+  }
+
+  function addDelay(seconds) {
+    const normalizedSeconds = Math.max(1, Math.trunc(Number(seconds) || 0));
+    if (!Number.isFinite(normalizedSeconds) || normalizedSeconds <= 0) { bot.log("invalid cave delay", { seconds }); return null; }
+    const delayWaypoint = { type: "delay", seconds: normalizedSeconds };
+    route.push(delayWaypoint);
+    persistRoute();
+    bot.log("cave delay added", { ...delayWaypoint, total: route.length });
+    return cloneValue(delayWaypoint);
+  }
+
+  function clearWaypoints() {
+    route = [];
+    state.currentIndex = 0;
+    state.direction = 1;
+    resetDelayState();
+    persistRoute();
+    bot.log("cave route cleared");
+    if (state.running) stop();
+    return [];
+  }
+
+  function clearTransitions() {
+    transitions = [];
+    state.pendingTransitionSource = null;
+    persistTransitions();
+    bot.log("cave learned transitions cleared");
+    return [];
+  }
+
+  function removeLastWaypoint() {
+    if (!route.length) return null;
+    const removed = route.pop();
+    if (state.currentIndex >= route.length) { state.currentIndex = Math.max(0, route.length - 1); resetDelayState(); }
+    if (route.length <= 1) state.direction = 1;
+    persistRoute();
+    bot.log("cave waypoint removed", removed);
+    if (!route.length && state.running) stop();
+    return removed;
+  }
+
+  function setCurrentIndex(index) {
+    if (!route.length) { state.currentIndex = 0; state.direction = 1; return 0; }
+    const nextIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(index) || 0)));
+    state.currentIndex = nextIndex;
+    resetDelayState();
+    state.direction = nextIndex >= route.length - 1 ? -1 : 1;
+    if (route.length <= 1) state.direction = 1;
+    return state.currentIndex;
+  }
+
+  function status() {
+    const position = normalizePosition(bot.getPlayerPosition());
+    const waypoint = getCurrentWaypoint();
+    return {
+      running: state.running,
+      config: { ...config },
+      route: getRoute(),
+      transitions: getTransitions(),
+      presetNames: getPresetNames(),
+      activePresetName: getActivePresetName(),
+      currentIndex: state.currentIndex,
+      direction: state.direction,
+      currentWaypoint: cloneValue(waypoint),
+      distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
+      lastPathAt: state.lastPathAt,
+      lastProgressAt: state.lastProgressAt,
+      pendingTransitionSource: cloneValue(state.pendingTransitionSource),
+      pausedForCombat: state.pausedForCombat,
+      pausedForCreatures: state.pausedForCreatures,
+      pausedForSpawn: state.pausedForSpawn,
+      nearbyCreatureCount: getNearbyCreatures().length,
+      spawnFloorCreatureCount: getSpawnFloorMonsters(position).length,
+      spawnWatchFloor: getSpawnWatchFloor(position),
+      spawnFloorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset),
+    };
+  }
+
+  function updateConfig(nextConfig = {}) {
+    if ("pauseUntilSpawnFloorOffset" in nextConfig) nextConfig.pauseUntilSpawnFloorOffset = normalizeSpawnFloorOffset(nextConfig.pauseUntilSpawnFloorOffset);
+    if ("waypointTolerance" in nextConfig) nextConfig.waypointTolerance = Math.max(0, Math.trunc(Number(nextConfig.waypointTolerance) || 0));
+    if ("waypointLookahead" in nextConfig) nextConfig.waypointLookahead = Math.max(1, Math.trunc(Number(nextConfig.waypointLookahead) || 12));
+    if ("maxProximitySkip" in nextConfig) nextConfig.maxProximitySkip = Math.max(1, Math.trunc(Number(nextConfig.maxProximitySkip) || 3));
+    if ("strictMode" in nextConfig) nextConfig.strictMode = !!nextConfig.strictMode;
+    if ("loopType" in nextConfig) nextConfig.loopType = (["reverse", "restart"].includes(String(nextConfig.loopType)) ? nextConfig.loopType : "reverse");
+    // ── VELOCIDADE: valida tickMs e repathMs sem forçar 500 ─
+    if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
+    if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
+    if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
+    Object.assign(config, nextConfig);
+    persistConfig();
+    bot.log("cave config updated", { ...config });
+    return { ...config };
+  }
+
+  // ── HOTKEY ─────────────────────────────────────────────────
+  const hotkeyConfigKey = "minibiaBot.caveHotkey.config";
+  const hotkeyConfig = Object.assign(
+    { stopKey: "Delete", startKey: "Insert", enabled: true },
+    bot.storage.get(hotkeyConfigKey, {})
+  );
+
+  function persistHotkeyConfig() { bot.storage.set(hotkeyConfigKey, { ...hotkeyConfig }); }
+
+  function showHotkeyToast(text) {
+    const existing = document.getElementById("minibia-cave-hotkey-toast");
+    if (existing) existing.remove();
+    const toast = document.createElement("div");
+    toast.id = "minibia-cave-hotkey-toast";
+    toast.textContent = text;
+    Object.assign(toast.style, {
+      position: "fixed", bottom: "80px", left: "50%", transform: "translateX(-50%)",
+      background: "rgba(0,0,0,0.82)", color: "#fff", padding: "8px 18px",
+      borderRadius: "8px", fontSize: "14px", fontFamily: "monospace",
+      zIndex: "999999", pointerEvents: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+      transition: "opacity 0.3s",
+    });
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = "0"; }, 1800);
+    setTimeout(() => { toast.remove(); }, 2200);
+  }
+
+  function onCaveHotkey(e) {
+    if (!hotkeyConfig.enabled) return;
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+    if (e.key === hotkeyConfig.stopKey) {
+      e.preventDefault();
+      if (state.running) {
+        stop();
+        bot.log("cavebot parado pela hotkey " + hotkeyConfig.stopKey);
+        showHotkeyToast("🛑 CaveBot parado (" + hotkeyConfig.stopKey + ")");
+      }
+      return;
+    }
+
+    if (e.key === hotkeyConfig.startKey) {
+      e.preventDefault();
+      if (!state.running) {
+        const started = start();
+        if (started) {
+          bot.log("cavebot iniciado pela hotkey " + hotkeyConfig.startKey);
+          showHotkeyToast("▶️ CaveBot iniciado (" + hotkeyConfig.startKey + ")");
+        } else {
+          showHotkeyToast("⚠️ CaveBot sem waypoints");
+        }
+      }
+      return;
+    }
+  }
+
+  function installHotkey() {
+    if (window.__caveHotkeyListener) {
+      document.removeEventListener("keydown", window.__caveHotkeyListener, true);
+    }
+    window.__caveHotkeyListener = onCaveHotkey;
+    document.addEventListener("keydown", onCaveHotkey, true);
+    bot.log("cave hotkey instalado — stop:" + hotkeyConfig.stopKey + " | start:" + hotkeyConfig.startKey);
+  }
+
+  function uninstallHotkey() {
+    if (window.__caveHotkeyListener) {
+      document.removeEventListener("keydown", window.__caveHotkeyListener, true);
+      window.__caveHotkeyListener = null;
+    }
+  }
+
+  function updateHotkeyConfig(next = {}) {
+    Object.assign(hotkeyConfig, next);
+    persistHotkeyConfig();
+    installHotkey();
+    bot.log("cave hotkey config atualizado", { ...hotkeyConfig });
+    return { ...hotkeyConfig };
+  }
+
+  installHotkey();
+
+  startObserver();
+  bot.addCleanup(stopObserver);
+  startMinimapOverlay();
+  bot.addCleanup(stopMinimapOverlay);
+  bot.addCleanup(uninstallHotkey);
+
+  if (config.enabled && route.length) start();
+
+  bot.cave = {
+    start, stop, status, updateConfig, config,
+    hotkey: {
+      updateConfig: updateHotkeyConfig,
+      enable()  { hotkeyConfig.enabled = true;  persistHotkeyConfig(); bot.log("cave hotkey habilitado"); },
+      disable() { hotkeyConfig.enabled = false; persistHotkeyConfig(); bot.log("cave hotkey desabilitado"); },
+      status()  { return { ...hotkeyConfig }; },
+    },
+    getRoute, getTransitions, getPresetNames, getActivePresetName, getCurrentWaypoint,
+    createPreset, savePreset, loadPreset, deletePreset, exportPresets, importPresets,
+    addWaypoint, addWaypointCurrentSpot, addDelay, clearWaypoints, clearTransitions,
+    removeLastWaypoint, setCurrentIndex, goToWaypoint, goToPosition, handleFloorChange,
+    findClosestWaypointIndex, syncWaypointProgress, findRopeSource, findShovelSource,
+    inspectNearbyTiles: (radius = 1) => {
+      const position = normalizePosition(bot.getPlayerPosition());
+      if (!position) return [];
+      return getLoadedTiles()
+        .map((tile) => ({ tile, position: getTilePosition(tile) }))
+        .filter((entry) =>
+          entry.position &&
+          entry.position.z === position.z &&
+          Math.abs(entry.position.x - position.x) <= radius &&
+          Math.abs(entry.position.y - position.y) <= radius
+        )
+        .map((entry) => ({
+          position: entry.position,
+          isFloorChange: isFloorChangeTile(entry.tile),
+          isHole: isHoleTile(entry.tile),
+          isRopeTarget: isRopeTargetTile(entry.tile),
+          isShovelTarget: isShovelTargetTile(entry.tile),
+          names: getTileThings(entry.tile).map((thing) => getThingName(thing)).filter(Boolean),
+        }));
+    },
+    isAtWaypoint,
+  };
+};
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installPanel = function installPanel(bot) {
+  const panelPositionKey  = "minibiaBot.ui.panelPosition";
+  const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
+  const expandedModulesKey = "minibiaBot.ui.expandedModules";
+
+  function getExpandedModules() { return bot.storage.get(expandedModulesKey, {}) || {}; }
+  function saveExpandedModule(moduleId, expanded) { bot.storage.set(expandedModulesKey, { ...getExpandedModules(), [moduleId]: !!expanded }); }
+
+  function initAccordions(panel) {
+    const expanded = getExpandedModules();
+    panel.querySelectorAll(".mb-accordion").forEach((accordion) => {
+      const moduleId = accordion.dataset.module;
+      if (!moduleId) return;
+      const toggle = accordion.querySelector(".mb-accordion-toggle");
+      const body   = accordion.querySelector(".mb-accordion-body");
+      const setExpanded = (next) => {
+        accordion.dataset.expanded = next ? "true" : "false";
+        if (body)   body.hidden = !next;
+        if (toggle) { toggle.textContent = next ? "−" : "+"; toggle.setAttribute("aria-label", next ? "Collapse section" : "Expand section"); }
+        saveExpandedModule(moduleId, next);
+      };
+      setExpanded(expanded[moduleId] === true);
+      accordion.querySelector(".mb-accordion-header")?.addEventListener("click", (e) => { if (e.target.closest("button, input, select, textarea, a, label")) return; setExpanded(accordion.dataset.expanded !== "true"); });
+      toggle?.addEventListener("click", (e) => { e.stopPropagation(); setExpanded(accordion.dataset.expanded !== "true"); });
+    });
+  }
+
+  function destroy() { document.getElementById("minibia-bot-panel")?.remove(); document.getElementById("minibia-bot-style")?.remove(); }
+  function savePanelPosition(pos, key = panelPositionKey) { bot.storage.set(key, pos); }
+  function getSavedPanelPosition(key = panelPositionKey) { return bot.storage.get(key, null); }
+  function savePanelCollapsed(c) { bot.storage.set(panelCollapsedKey, !!c); }
+  function getSavedPanelCollapsed() { return !!bot.storage.get(panelCollapsedKey, false); }
+
+  // ── Export / Import de config ─────────────────────────────
+  const ALL_CONFIG_KEYS = [
+    "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
+    "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
+    "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
+    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
+    "minibiaBot.pz.home", "minibiaBot.panic.config",
+    "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
+    "minibiaBot.cave.config",
+  ];
+
+  function exportConfig() {
+    const data = {};
+    ALL_CONFIG_KEYS.forEach((key) => {
+      const v = bot.storage.get(key, null);
+      if (v !== null) data[key] = v;
+    });
+    return JSON.stringify(data, null, 2);
+  }
+
+  function importConfig(json) {
+    try {
+      const data = JSON.parse(json);
+      if (typeof data !== "object" || !data) return false;
+      Object.entries(data).forEach(([key, value]) => bot.storage.set(key, value));
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // ── Refresh functions ─────────────────────────────────────
+  function refreshHomeLabel() { const el = document.getElementById("minibia-bot-home"); if (!el) return; const h = bot.pz?.getHomePz?.(); el.textContent = h ? `Home PZ: ${h.x}, ${h.y}, ${h.z}` : "Home PZ: not set"; }
+  function refreshPanicStatus() {
+    const s = bot.panic?.status?.()?.config;
+    const u = document.getElementById("minibia-bot-panic-unknown"); if (u) u.checked = !!s?.unknownPlayerEnabled;
+    const h = document.getElementById("minibia-bot-panic-health");  if (h) h.checked = !!s?.healthLossEnabled;
+    const r = document.getElementById("minibia-bot-panic-return");  if (r) r.checked = !!s?.returnToOriginEnabled;
+  }
+  function refreshXrayStatus() {
+    const status = bot.xray?.status?.(); const me = bot.getPlayerPosition?.();
+    const ob = document.getElementById("minibia-bot-xray-overlay-toggle"); if (ob) ob.textContent = status?.config?.overlayEnabled ? "Disable Overlay" : "Enable Overlay";
+    const ol = document.getElementById("minibia-bot-xray-overlay-status");
+    if (ol) { const fl = status?.config?.selectedFloor == null ? "all floors" : String(me ? me.z - status.config.selectedFloor : status.config.selectedFloor); ol.textContent = `${status?.config?.overlayEnabled ? "Overlay: on" : "Overlay: off"} • ${fl}`; }
+    const fs = document.getElementById("minibia-bot-xray-floor-select");
+    if (fs) {
+      const floors = Array.from(new Set((status?.visibleCreatures||[]).map(c=>c?.position?.z).filter(f=>f!=null))).sort((a,b)=>a-b);
+      const sel = status?.config?.selectedFloor;
+      if (sel != null && !floors.includes(sel)) { floors.push(sel); floors.sort((a,b)=>a-b); }
+      fs.innerHTML = ""; const ao = document.createElement("option"); ao.value="all"; ao.textContent="All floors"; fs.appendChild(ao);
+      floors.forEach(f=>{ const o=document.createElement("option"); o.value=String(f); o.textContent = me ? String(me.z-f) : String(f); fs.appendChild(o); });
+      fs.value = sel==null?"all":String(sel);
+    }
+  }
+  function renderList(listId, names, onRemove) {
+    const list = document.getElementById(listId); if (!list) return;
+    list.innerHTML = "";
+    if (!names.length) { const e=document.createElement("div"); e.className="mb-small-note"; e.textContent="Vazio."; list.appendChild(e); return; }
+    names.forEach((name,index) => {
+      const row=document.createElement("div"); row.className="mb-list-row";
+      const label=document.createElement("span"); label.textContent=name;
+      const btn=document.createElement("button"); btn.type="button"; btn.className="mb-small-button"; btn.textContent="Remove";
+      btn.addEventListener("click",()=>onRemove(index));
+      row.appendChild(label); row.appendChild(btn); list.appendChild(row);
+    });
+  }
+  function renderTrustedNames() { renderList("minibia-bot-panic-trusted-list", bot.panic?.config?.trustedNames||[], (i)=>{ bot.panic.updateConfig({trustedNames:(bot.panic.config.trustedNames||[]).filter((_,j)=>j!==i)}); renderTrustedNames(); }); }
+  function renderGameMasterNames() { renderList("minibia-bot-panic-gm-list", bot.panic?.config?.gameMasterNames||[], (i)=>{ bot.panic.updateConfig({gameMasterNames:(bot.panic.config.gameMasterNames||[]).filter((_,j)=>j!==i)}); renderGameMasterNames(); }); }
+  function renderAttackTargetNames() { renderList("minibia-bot-auto-attack-target-list", bot.attack?.config?.targetNames||[], (i)=>{ bot.attack.updateConfig({targetNames:(bot.attack.config.targetNames||[]).filter((_,j)=>j!==i)}); renderAttackTargetNames(); }); }
+  function refreshRuneStatus() { const t=document.getElementById("minibia-bot-rune-enabled"); if(t) t.checked=!!bot.rune?.status?.().running; }
+  function refreshAutoEatStatus() { const t=document.getElementById("minibia-bot-auto-eat-enabled"); if(t) t.checked=!!bot.eat?.status?.().running; }
+  function refreshAutoHealStatus() { const t=document.getElementById("minibia-bot-auto-heal-enabled"); if(t) t.checked=!!bot.heal?.status?.().running; }
+  function refreshAutoInvisibleStatus() { const t=document.getElementById("minibia-bot-auto-invisible-enabled"); if(t) t.checked=!!bot.invisible?.status?.().running; }
+  function refreshAutoMagicShieldStatus() { const t=document.getElementById("minibia-bot-auto-magic-shield-enabled"); if(t) t.checked=!!bot.magicShield?.status?.().running; }
+  function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
+  function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
+  function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - haste:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
+  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"💍 equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo • cap ${cap} • ${anel} • ${origem}`; }
+  function refreshFollowStatus() {
+    const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
+    if(t) t.checked=!!s?.running;
+    if(l) { if(!s?.targetName) l.textContent="Status: no player set"; else if(s?.running) { const d=s.currentDistance!=null?`, dist ${s.currentDistance}/${s.desiredDistance} sqm`:""; l.textContent=`Status: following ${s.targetName}${d}${s.targetVisible?" (visible)":" (lost)"}`; } else l.textContent=`Status: idle (${s.targetName||"no player"})`; }
+  }
+  function refreshTalkStatus() {
+    const t=document.getElementById("minibia-bot-talk-enabled"); const l=document.getElementById("minibia-bot-talk-status"); const s=bot.talk?.status?.();
+    if(t) t.checked=!!s?.running;
+    if(l) { if(!s?.config?.apiKey) l.textContent="Status: API key missing"; else if(s?.pending) l.textContent="Status: generating"; else if(s?.running) l.textContent="Status: listening"; else l.textContent="Status: idle"; }
+  }
+  function refreshCaveStatus() {
+    const sl=document.getElementById("minibia-bot-cave-status"); const sb=document.getElementById("minibia-bot-cave-start"); const st=document.getElementById("minibia-bot-cave-stop");
+    const route=bot.cave?.getRoute?.()||[]; const status=bot.cave?.status?.();
+    if(sl) { if(!route.length) sl.textContent="Status: no waypoints"; else if(status?.running) { const wp=(status.currentIndex??0)+1; const dist=Number.isFinite(status?.distanceToWaypoint)&&status.distanceToWaypoint>=0?`, dist ${status.distanceToWaypoint}`:""; const pause=status?.pausedForSpawn?", waiting spawn":status?.pausedForCreatures?`, waiting (${status.nearbyCreatureCount||0})`:status?.pausedForCombat?", paused combat":""; sl.textContent=`Status: running (${wp}/${route.length}${dist}${pause})`; } else sl.textContent=`Status: idle (${route.length} waypoints)`; }
+    if(sb) sb.disabled=!route.length||!!status?.running;
+    if(st) st.disabled=!status?.running;
+  }
+  function refreshCavePresetControls() {
+    const sel=document.getElementById("minibia-bot-cave-preset-select"); const lbl=document.getElementById("minibia-bot-cave-preset-status"); const del=document.getElementById("minibia-bot-cave-preset-delete");
+    const status=bot.cave?.status?.(); const names=status?.presetNames||bot.cave?.getPresetNames?.()||[]; const active=status?.activePresetName||bot.cave?.getActivePresetName?.()||"Default";
+    if(sel) { const prev=sel.value; sel.innerHTML=""; if(!names.length){const o=document.createElement("option");o.value="";o.textContent="No saved presets";sel.appendChild(o);sel.disabled=true;}else{names.forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;sel.appendChild(o)});sel.disabled=false;const nv=names.includes(active)?active:prev;if(nv)sel.value=nv;} }
+    if(lbl) lbl.textContent=names.length?`Preset: ${active} (${names.length} saved)`:`Preset: ${active}`;
+    if(del) del.disabled=!names.length||!sel?.value;
+  }
+  function refreshCaveClosestStatus() { const l=document.getElementById("minibia-bot-cave-closest"); if(!l) return; const pos=bot.getPlayerPosition?.(); const route=bot.cave?.getRoute?.()||[]; if(!pos){l.textContent="Closest: no position";return;} if(!route.filter(w=>w?.type!=="delay").length){l.textContent="Closest: no waypoints";return;} const idx=bot.cave?.findClosestWaypointIndex?.(pos)??0; const w=route[idx]; l.textContent=w?`Closest: ${idx+1}. ${w.x},${w.y},${w.z}`:"Closest: unavailable"; }
+  function refreshCaveTransitionStatus() { const l=document.getElementById("minibia-bot-cave-transition-status"); if(!l) return; const t=bot.cave?.getTransitions?.()||[]; if(!t.length){l.textContent="Transitions: none";return;} const lt=t.slice().sort((a,b)=>Number(b?.lastSeenAt||0)-Number(a?.lastSeenAt||0))[0]; if(!lt?.from||!lt?.to){l.textContent=`Transitions: ${t.length}`;return;} const ex=t.length>1?` (+${t.length-1})`:""; l.textContent=`Transitions: ${lt.from.x},${lt.from.y},${lt.from.z} → ${lt.to.x},${lt.to.y},${lt.to.z}${ex}`; }
+  function refreshProfilesPanel() {
+    const al=document.getElementById("minibia-bot-profiles-active"); const sel=document.getElementById("minibia-bot-profiles-select"); const ni=document.getElementById("minibia-bot-profiles-name-input");
+    const s=bot.profiles?.status?.(); const profiles=s?.profiles||[]; const active=s?.activeProfile||null;
+    if(al) al.textContent=active?`Active: ${active}`:"Active: none";
+    if(sel) { const prev=sel.value; sel.innerHTML=""; if(!profiles.length){const o=document.createElement("option");o.value="";o.textContent="No profiles";sel.appendChild(o);sel.disabled=true;}else{sel.disabled=false;profiles.forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;sel.appendChild(o)});const ts=profiles.includes(active)?active:profiles.includes(prev)?prev:profiles[0];if(ts){sel.value=ts;if(ni&&!ni.value)ni.value=ts;}} }
+  }
+  function refreshFriendHealStatus() {
+    const t=document.getElementById("minibia-bot-friend-heal-enabled"); const l=document.getElementById("minibia-bot-friend-heal-status"); const s=bot.friendHeal?.status?.();
+    if(t) t.checked=!!s?.running;
+    if(l) { if(!s?.config?.targetName) l.textContent="Status: configure o target"; else l.textContent=s?.running?`Status: ativo • ${s.targetFound?"✓ visível":"✗ não encontrado"}${s.targetHpPercent!=null?" • HP: "+s.targetHpPercent.toFixed(1)+"%":""}`:"Status: parado"; }
+  }
+  function refreshAutoSpellStatus() {
+    const t=document.getElementById("minibia-bot-auto-spell-enabled"); const l=document.getElementById("minibia-bot-auto-spell-status"); const s=bot.autoSpell?.status?.();
+    if(t) t.checked=!!s?.running;
+    if(l) l.textContent=s?.running?`Status: ativo • mobs: ${s.adjacentMobs} • combat: ${s.combatActive?"✓":"✗"}`:"Status: parado";
+  }
+  function refreshDistanceAttackStatus() {
+    const t=document.getElementById("minibia-bot-distance-attack-enabled"); const l=document.getElementById("minibia-bot-distance-attack-status"); const s=bot.distanceAttack?.status?.();
+    if(t) t.checked=!!s?.running;
+    if(l) { if(s?.running) { const dist=Number.isFinite(s.distanceToTarget)?s.distanceToTarget:"?"; const stuck=s.stuckCount>0?` • stuck:${s.stuckCount}`:""; l.textContent=`Status: ativo • dist: ${dist} sqm • alvo: ${s.currentTarget?.name||"nenhum"}${stuck}`; } else l.textContent="Status: parado"; }
+  }
+  function refreshVisibleCreatures() {
+    const list=document.getElementById("minibia-bot-visible-creatures-list"); if(!list) return;
+    const me=bot.getPlayerPosition?.(); const status=bot.xray?.status?.(); const creatures=status?.visibleCreatures||[]; const sel=status?.config?.selectedFloor;
+    list.innerHTML="";
+    if(!me){const e=document.createElement("div");e.className="mb-small-note";e.textContent="Position unavailable.";list.appendChild(e);return;}
+    const visible=creatures.filter(c=>{const f=c?.position?.z;if(f==null)return false;if(sel!=null)return f===sel;return f!==me.z;}).sort((a,b)=>{const fa=Math.abs((a.position?.z||0)-me.z),fb=Math.abs((b.position?.z||0)-me.z);if(fa!==fb)return fa-fb;const da=Math.abs((a.position?.x||0)-me.x)+Math.abs((a.position?.y||0)-me.y),db=Math.abs((b.position?.x||0)-me.x)+Math.abs((b.position?.y||0)-me.y);return da-db;});
+    if(!visible.length){const e=document.createElement("div");e.className="mb-small-note";e.textContent="No off-floor creatures.";list.appendChild(e);return;}
+    let curFloor=null;
+    visible.forEach(c=>{
+      const f=c.position?.z;
+      if(f!==curFloor){curFloor=f;const fo=me.z-f;const fol=fo===0?"0":fo>0?`+${fo}`:`${fo}`;const fl=document.createElement("div");fl.className="mb-floor-label";fl.textContent=fol;list.appendChild(fl);}
+      const row=document.createElement("div");row.className="mb-creature-row";
+      const name=document.createElement("div");name.className="mb-creature-name";name.textContent=c.name||(c.type===0?"Player":"Mob");
+      const meta=document.createElement("div");meta.className="mb-small-note";meta.textContent=`${c.type===0?"Player":"Mob"} at ${c.position.x},${c.position.y},${c.position.z}`;
+      row.appendChild(name);row.appendChild(meta);list.appendChild(row);
+    });
+  }
+
+  function setPanelCollapsed(panel, collapsed) {
+    if(!panel) return;
+    const body=panel.querySelector(".mb-body"); const toggle=panel.querySelector("#minibia-bot-collapse");
+    panel.dataset.collapsed=collapsed?"true":"false";
+    if(body) body.hidden=collapsed;
+    if(toggle){toggle.textContent=collapsed?"+":"−";toggle.setAttribute("aria-label",collapsed?"Maximize":"Minimize");toggle.setAttribute("title",collapsed?"Maximize":"Minimize");}
+    savePanelCollapsed(collapsed);
+  }
+
+  function applySavedPanelPosition(panel, key=panelPositionKey) {
+    const p=getSavedPanelPosition(key); if(!p) return;
+    if(typeof p.top==="number") panel.style.top=`${p.top}px`;
+    if(typeof p.left==="number"){panel.style.left=`${p.left}px`;panel.style.right="auto";}
+  }
+
+  function enableDrag(panel, key=panelPositionKey) {
+    const handle=panel.querySelector(".mb-title"); if(!handle) return;
+    let drag=null;
+    const onMove=(e)=>{ if(!drag) return; const maxL=Math.max(0,window.innerWidth-panel.offsetWidth),maxT=Math.max(0,window.innerHeight-panel.offsetHeight); panel.style.left=`${Math.min(Math.max(0,e.clientX-drag.ox),maxL)}px`; panel.style.top=`${Math.min(Math.max(0,e.clientY-drag.oy),maxT)}px`; panel.style.right="auto"; };
+    const onUp=()=>{ if(!drag) return; drag=null; const r=panel.getBoundingClientRect(); savePanelPosition({left:r.left,top:r.top},key); };
+    handle.addEventListener("mousedown",(e)=>{ if(e.button!==0) return; const r=panel.getBoundingClientRect(); drag={ox:e.clientX-r.left,oy:e.clientY-r.top}; e.preventDefault(); });
+    window.addEventListener("mousemove",onMove); window.addEventListener("mouseup",onUp);
+    bot.addCleanup(()=>{ window.removeEventListener("mousemove",onMove); window.removeEventListener("mouseup",onUp); });
+  }
+
+  function inject() {
+    destroy();
+
+    const style=document.createElement("style"); style.id="minibia-bot-style";
+    style.textContent=`
+      #minibia-bot-panel{position:fixed;top:10px;right:10px;z-index:999999;width:460px;max-width:calc(100vw - 20px);background:#d4d0c8;border:2px solid;border-color:#ffffff #808080 #808080 #ffffff;font:13px/1.4 Segoe UI,Arial,sans-serif;color:#000;user-select:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;font-weight:normal}
+      #minibia-bot-panel *{box-sizing:border-box}
+      #minibia-bot-panel .mb-titlebar{background:linear-gradient(to right,#0a246a 0%,#a6caf0 100%);color:#fff;font-size:13px;padding:3px 4px 3px 6px;display:flex;align-items:center;justify-content:space-between;gap:4px;cursor:move}
+      #minibia-bot-panel .mb-title{flex:1;white-space:nowrap}
+      #minibia-bot-panel .mb-titlebar-btns{display:flex;gap:2px}
+      #minibia-bot-panel .mb-icon-button{width:16px;height:14px;min-width:16px;padding:0;background:#d4d0c8;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff;color:#000;font:normal 11px Segoe UI,Arial,sans-serif;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+      #minibia-bot-panel .mb-icon-button:active{border-color:#808080 #ffffff #ffffff #808080}
+      #minibia-bot-panel .mb-tabs{display:flex;flex-wrap:wrap;padding:3px 4px 0;gap:2px;background:#d4d0c8;border-bottom:1px solid #808080}
+      #minibia-bot-panel .mb-tab{padding:2px 8px 3px;border:1px solid;border-color:#ffffff #808080 #d4d0c8 #ffffff;background:#bbb8b0;font:13px Segoe UI,Arial,sans-serif;cursor:pointer;border-bottom:none;position:relative;top:1px;color:#000;white-space:nowrap}
+      #minibia-bot-panel .mb-tab.mb-tab-active{background:#d4d0c8;z-index:2;padding-bottom:4px}
+      #minibia-bot-panel .mb-tab:hover:not(.mb-tab-active){background:#c8c5be}
+      #minibia-bot-panel .mb-tab-content{display:none}
+      #minibia-bot-panel .mb-tab-content.mb-tab-active{display:block}
+      #minibia-bot-panel .mb-body{padding:6px;max-height:min(70vh,520px);overflow-y:auto;scrollbar-width:thin;background:#d4d0c8}
+      #minibia-bot-panel .mb-group{border:1px solid #808080;border-top:none;padding:10px 8px 8px;position:relative;margin-top:10px;background:#d4d0c8}
+      #minibia-bot-panel .mb-group-title{position:absolute;top:-7px;left:8px;background:#d4d0c8;padding:0 3px;font-size:13px}
+      #minibia-bot-panel .mb-stack{display:flex;flex-direction:column;gap:5px}
+      #minibia-bot-panel .mb-row{display:flex;align-items:center;gap:6px}
+      #minibia-bot-panel .mb-toggle{display:flex;align-items:center;gap:5px;font-size:13px;color:#000;cursor:pointer}
+      #minibia-bot-panel .mb-toggle input[type="checkbox"]{width:13px;height:13px;margin:0;cursor:pointer}
+      #minibia-bot-panel button{height:21px;min-width:60px;padding:0 8px;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff;background:#d4d0c8;font:13px Segoe UI,Arial,sans-serif;cursor:pointer;color:#000;white-space:nowrap}
+      #minibia-bot-panel button:hover{background:#e0ddd5}
+      #minibia-bot-panel button:active{border-color:#808080 #ffffff #ffffff #808080}
+      #minibia-bot-panel button:disabled{color:#808080;cursor:default}
+      #minibia-bot-panel button.mb-btn-full{width:100%}
+      #minibia-bot-panel .mb-small-button{height:18px;min-width:40px;padding:0 6px;font-size:13px}
+      #minibia-bot-panel input:not([type="checkbox"]),#minibia-bot-panel select,#minibia-bot-panel textarea{height:19px;border:1px solid;border-color:#808080 #ffffff #ffffff #808080;background:#fff;padding:0 3px;font:13px Segoe UI,Arial,sans-serif;color:#000;width:100%}
+      #minibia-bot-panel textarea{height:auto;min-height:48px;padding:3px;resize:vertical}
+      #minibia-bot-panel input[type="number"]{width:60px}
+      #minibia-bot-panel .mb-inline{display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center}
+      #minibia-bot-panel .mb-field{display:flex;flex-direction:column;gap:2px}
+      #minibia-bot-panel .mb-field-label{font-size:13px;color:#000}
+      #minibia-bot-panel .mb-field input{width:100%}
+      #minibia-bot-panel .mb-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+      #minibia-bot-panel .mb-small-note{font-size:13px;color:#444}
+      #minibia-bot-panel .mb-label{font-size:13px;color:#000}
+      #minibia-bot-panel .mb-note{font-size:12px;color:#666;margin-top:4px}
+      #minibia-bot-panel .mb-list{display:flex;flex-direction:column;gap:3px}
+      #minibia-bot-panel .mb-list-row{display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center;border-bottom:1px solid #c0bdb5;padding-bottom:3px}
+      #minibia-bot-panel .mb-creature-row{border-bottom:1px solid #c0bdb5;padding:2px 0;font-size:13px}
+      #minibia-bot-panel .mb-creature-name{font-weight:normal}
+      #minibia-bot-panel .mb-floor-label{font-size:13px;color:#0a246a;margin-top:4px;margin-bottom:2px}
+      #minibia-bot-panel .mb-actions-inline-two{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+      #minibia-bot-panel .mb-actions-inline-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px}
+      #minibia-bot-panel .mb-statusbar{background:#d4d0c8;border-top:1px solid #808080;padding:3px 6px;display:flex;gap:6px;font-size:13px}
+      #minibia-bot-panel .mb-statuspanel{border:1px solid;border-color:#808080 #ffffff #ffffff #808080;padding:1px 6px;font-size:13px;color:#000;white-space:nowrap}
+      #minibia-bot-panel .mb-row-three{display:grid;grid-template-columns:auto minmax(80px,1fr) 56px;align-items:center;gap:6px}
+      #minibia-bot-panel .mb-row-three input{min-width:0}
+      #minibia-bot-panel #minibia-bot-visible-creatures-list{max-height:100px;overflow-y:auto}
+      #minibia-bot-panel #minibia-bot-panic-trusted-list{max-height:80px;overflow-y:auto}
+      #minibia-bot-panel .mb-accordion{display:contents}
+      #minibia-bot-panel .mb-accordion-header{display:none}
+      #minibia-bot-panel .mb-accordion-body{display:block!important}
+      #minibia-bot-panel .mb-accordion-body[hidden]{display:none!important}
+    `;
+    document.head.appendChild(style);
+
+    const panel=document.createElement("div"); panel.id="minibia-bot-panel";
+    panel.innerHTML=`
+      <div class="mb-titlebar">
+        <span class="mb-title">Minibia Bot v0.3</span>
+        <div class="mb-titlebar-btns"><button type="button" class="mb-icon-button" id="minibia-bot-collapse" title="Minimize">_</button></div>
+      </div>
+      <div class="mb-tabs" id="minibia-bot-tabs">
+        <div class="mb-tab mb-tab-active" data-tab="heal">Heal</div>
+        <div class="mb-tab" data-tab="rune">Rune</div>
+        <div class="mb-tab" data-tab="attack">Attack</div>
+        <div class="mb-tab" data-tab="cave">Cave</div>
+        <div class="mb-tab" data-tab="panic">Panic</div>
+        <div class="mb-tab" data-tab="extra">Extra</div>
+        <div class="mb-tab" data-tab="tools">Tools</div>
+        <div class="mb-tab" data-tab="config">Config</div>
+      </div>
+      <div class="mb-body">
+
+        <!-- ABA: Heal -->
+        <div class="mb-tab-content mb-tab-active" data-tab="heal">
+          <div class="mb-group"><span class="mb-group-title">Auto Heal</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-heal-enabled" /><span>Enable Auto Heal</span></label>
+              <span class="mb-small-note">HP: Nível 2 tem prioridade sobre Nível 1</span>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">HP% Nível 1 (fraco)</span><input type="number" id="minibia-bot-hp-threshold1" min="1" max="100" placeholder="90" /></div>
+                <div class="mb-field"><span class="mb-field-label">Hotkey Nível 1</span><input type="number" id="minibia-bot-hp-hotkey1" min="1" max="12" placeholder="1" /></div>
+                <div class="mb-field"><span class="mb-field-label">HP% Nível 2 (forte)</span><input type="number" id="minibia-bot-hp-threshold2" min="1" max="100" placeholder="60" /></div>
+                <div class="mb-field"><span class="mb-field-label">Hotkey Nível 2</span><input type="number" id="minibia-bot-hp-hotkey2" min="1" max="12" placeholder="2" /></div>
+                <div class="mb-field"><span class="mb-field-label">Mana% threshold</span><input type="number" id="minibia-bot-mana-threshold" min="1" max="100" placeholder="50" /></div>
+                <div class="mb-field"><span class="mb-field-label">Mana Hotkey</span><input type="number" id="minibia-bot-mana-hotkey" min="1" max="12" placeholder="3" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown HP (ms)</span><input type="number" id="minibia-bot-heal-cooldown" min="50" placeholder="100" /></div>
+                <div class="mb-field"><span class="mb-field-label">Retry HP (ms)</span><input type="number" id="minibia-bot-heal-retry" min="50" placeholder="100" /></div>
+              </div>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Utilities</span>
+            <div class="mb-stack">
+              <div class="mb-row"><label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-eat-enabled" /><span>Auto Eat</span></label><span class="mb-field-label" style="margin-left:auto">Slot</span><input type="number" id="minibia-bot-auto-eat-hotkey" min="1" max="12" placeholder="10" style="width:44px" /></div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-invisible-enabled" /><span>Auto Invisible (utana vid)</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-magic-shield-enabled" /><span>Auto Utamo Vita</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-equip-ring-enabled" /><span>Auto Equip Ring</span></label>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Stack (Runas)</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-stack-enabled" /><span>Enable Auto Stack</span></label>
+              <div class="mb-row"><span class="mb-field-label">Intervalo (ms)</span><input type="number" id="minibia-bot-auto-stack-tick" min="500" placeholder="2000" style="width:70px" /><button type="button" class="mb-small-button" id="minibia-bot-auto-stack-now">Agrupar agora</button></div>
+              <span class="mb-small-note" id="minibia-bot-auto-stack-status">Status: parado</span>
+              <span class="mb-note">Agrupa apenas runas na primeira bag aberta.</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Ring por Cap</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-capring-enabled" /><span>Enable Auto Ring por Cap</span></label>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Tirar anel (cap &lt;)</span><input type="number" id="mb-capring-min" min="0" placeholder="200" /></div>
+                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap ≥)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-capring-cd" min="500" placeholder="1500" /></div>
+              </div>
+              <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
+              <span class="mb-small-note" id="mb-capring-status">Status: parado</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Haste</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
+              <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
+              <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
+              <span class="mb-note">Detecta automatico pelo ID 17. Nao lanca com target na tela.</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Rune -->
+        <div class="mb-tab-content" data-tab="rune">
+          <div class="mb-group"><span class="mb-group-title">Magic Level Trainer</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-rune-enabled" /><span>Enable</span></label>
+              <div class="mb-field"><span class="mb-field-label">Spell words</span><input type="text" id="minibia-bot-rune-spell" placeholder="adori vita vis" style="width:100%" /></div>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Min Mana</span><input type="number" id="minibia-bot-rune-mana-min" min="0" placeholder="600" /></div>
+                <div class="mb-field"><span class="mb-field-label">Max Mana</span><input type="number" id="minibia-bot-rune-mana-max" min="0" placeholder="600" /></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Attack -->
+        <div class="mb-tab-content" data-tab="attack">
+          <div class="mb-group"><span class="mb-group-title">Auto Attack</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-attack-enabled" /><span>Enable Auto Attack</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-attack-melee" /><span>Melee Mode</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-attack-skill-train" /><span>Skill Train on Monster</span></label>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Range (sqm)</span><input type="number" id="minibia-bot-auto-attack-max-distance" min="1" max="15" placeholder="6" /></div>
+                <div class="mb-field"><span class="mb-field-label">Target Hotkey</span><input type="number" id="minibia-bot-auto-attack-hotkey" min="1" max="12" placeholder="3" /></div>
+                <div class="mb-field"><span class="mb-field-label">Rune Hotkey</span><input type="number" id="minibia-bot-auto-attack-rune-hotkey" min="1" max="12" placeholder="4" /></div>
+                <div class="mb-field"><span class="mb-field-label">Rune Cooldown (ms)</span><input type="number" id="minibia-bot-auto-attack-rune-cooldown" min="200" placeholder="1200" /></div>
+              </div>
+              <div class="mb-inline"><input type="text" id="minibia-bot-auto-attack-target-input" placeholder="e.g. Rotworm" style="width:100%" /><button type="button" class="mb-small-button" id="minibia-bot-auto-attack-target-add">Add</button></div>
+              <div class="mb-list" id="minibia-bot-auto-attack-target-list"></div>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Distance Attack</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-distance-attack-enabled" /><span>Enable Distance Attack</span></label>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Manter distância (sqm)</span><input type="number" id="minibia-bot-distance-keep" min="1" max="10" placeholder="3" /></div>
+                <div class="mb-field"><span class="mb-field-label">Hotkey de ataque (1-12)</span><input type="number" id="minibia-bot-distance-hotkey" min="1" max="12" placeholder="4" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="minibia-bot-distance-cooldown" min="200" placeholder="1200" /></div>
+              </div>
+              <span class="mb-small-note" id="minibia-bot-distance-attack-status">Status: parado</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Melee Position</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-melee-enabled"/><span>Enable Melee Position</span></label>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Spell Hotkey (1-12)</span><input type="number" id="mb-melee-slot" min="1" max="12" placeholder="5"/></div>
+                <div class="mb-field"><span class="mb-field-label">Spell Cooldown (ms)</span><input type="number" id="mb-melee-cd" min="200" placeholder="2000"/></div>
+                <div class="mb-field"><span class="mb-field-label">Modo</span><select id="mb-melee-mode"><option value="ortogonal">N/S/L/O (ortogonal)</option><option value="diagonal">Diagonal</option><option value="any">Qualquer lado</option></select></div>
+                <div class="mb-field"><span class="mb-field-label">Só atira se adjacente</span><select id="mb-melee-require"><option value="true">Sim</option><option value="false">Não</option></select></div>
+              </div>
+              <span class="mb-small-note" id="mb-melee-status">Status: parado</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Follow</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-follow-enabled" /><span>Enable Auto Follow</span></label>
+              <div class="mb-field"><span class="mb-field-label">Player Name</span><input type="text" id="minibia-bot-follow-target" placeholder="Name of player to follow" style="width:100%" /></div>
+              <div class="mb-row"><span class="mb-field-label">Distance (sqm)</span><input type="number" id="minibia-bot-follow-distance" min="0" max="10" placeholder="2" style="width:50px" /></div>
+              <span class="mb-small-note" id="minibia-bot-follow-status">Status: idle</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Cave -->
+        <div class="mb-tab-content" data-tab="cave">
+          <div class="mb-group"><span class="mb-group-title">Cave Bot</span>
+            <div class="mb-stack">
+              <div class="mb-field"><span class="mb-field-label">Preset</span><select id="minibia-bot-cave-preset-select"></select></div>
+              <div class="mb-actions-inline-two"><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-new">New</button><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-delete">Delete</button></div>
+              <div class="mb-actions-inline-two"><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-export">Export</button><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-import">Import</button></div>
+              <div class="mb-actions-inline-two"><button type="button" class="mb-small-button" id="minibia-bot-cave-record">Record Spot</button><button type="button" class="mb-small-button" id="minibia-bot-cave-add-delay">Add Delay</button></div>
+              <button type="button" class="mb-small-button mb-btn-full" id="minibia-bot-cave-remove-last">Remove Last Waypoint</button>
+              <span class="mb-small-note" id="minibia-bot-cave-closest">Closest: no waypoints</span>
+              <span class="mb-small-note" id="minibia-bot-cave-transition-status">Transitions: none</span>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-pause-until-clear" /><span>Pause Until Clear</span></label>
+              <!-- ── NOVOS CONTROLES: Strict Mode ──────────────────── -->
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-strict-mode" /><span>Strict Mode (inteligente)</span></label>
+              <div class="mb-row-three">
+                <span>Loop Type</span>
+                <select id="minibia-bot-cave-loop-type">
+                  <option value="reverse">Volta (reverse)</option>
+                  <option value="restart">Pula pro 1º (restart)</option>
+                </select>
+              </div>
+              <div class="mb-row-three">
+                <span>Max Proximity Skip</span>
+                <input type="number" id="minibia-bot-cave-max-proximity-skip" min="1" max="10" value="3" placeholder="3" style="width:60px" />
+              </div>
+              <!-- ───────────────────────────────────────────────────── -->
+              <div class="mb-row-three"><label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-pause-until-spawn" /><span>Pause Until Monster on Floor</span></label><span></span><input type="number" id="minibia-bot-cave-spawn-floor-offset" placeholder="+1" style="width:50px" /></div>
+              <div class="mb-actions-inline-two"><button type="button" id="minibia-bot-cave-start">Start</button><button type="button" id="minibia-bot-cave-stop">Stop</button></div>
+              <span class="mb-small-note" id="minibia-bot-cave-status">Status: no waypoints</span>
+              <span class="mb-small-note">Hotkey: Insert iniciar • Delete parar</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Panic -->
+        <div class="mb-tab-content" data-tab="panic">
+          <div class="mb-group"><span class="mb-group-title">Panic Runner</span>
+            <div class="mb-stack">
+              <span class="mb-label" id="minibia-bot-home">Home PZ: not set</span>
+              <button type="button" id="minibia-bot-set-home">Set Home (current spot)</button>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-panic-unknown" /><span>Flee on unknown player</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-panic-health" /><span>Flee on health loss</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-panic-return" /><span>Auto return after flee</span></label>
+              <div class="mb-inline"><input type="text" id="minibia-bot-panic-trusted-input" placeholder="Trusted player name" style="width:100%" /><button type="button" class="mb-small-button" id="minibia-bot-panic-trusted-add">Add</button></div>
+              <div class="mb-list" id="minibia-bot-panic-trusted-list"></div>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">GM Kill Switch</span>
+            <div class="mb-stack">
+              <div class="mb-inline"><input type="text" id="minibia-bot-panic-gm-input" placeholder="Game master name" style="width:100%" /><button type="button" class="mb-small-button" id="minibia-bot-panic-gm-add">Add</button></div>
+              <div class="mb-list" id="minibia-bot-panic-gm-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Extra (Friend Heal + Auto Spell) -->
+        <div class="mb-tab-content" data-tab="extra">
+          <div class="mb-group"><span class="mb-group-title">Friend Heal</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-friend-heal-enabled" /><span>Enable Friend Heal</span></label>
+              <div class="mb-field"><span class="mb-field-label">Nome do player a curar</span><input type="text" id="minibia-bot-friend-heal-target" placeholder="ex: Xanathos" style="width:100%" /></div>
+              <div class="mb-field"><span class="mb-field-label">Feitiço</span><input type="text" id="minibia-bot-friend-heal-spell" placeholder="exura sio" style="width:100%" /></div>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Curar quando HP% ≤</span><input type="number" id="minibia-bot-friend-heal-hp" min="1" max="100" placeholder="70" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="minibia-bot-friend-heal-cooldown" min="500" placeholder="1500" /></div>
+              </div>
+              <span class="mb-small-note" id="minibia-bot-friend-heal-status">Status: parado</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Spell (AoE)</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-spell-enabled" /><span>Enable Auto Spell</span></label>
+              <div class="mb-field"><span class="mb-field-label">Feitiço</span><input type="text" id="minibia-bot-auto-spell-words" placeholder="exori" style="width:100%" /></div>
+              <div class="mb-field-grid">
+                <div class="mb-field"><span class="mb-field-label">Mínimo de mobs</span><input type="number" id="minibia-bot-auto-spell-min-mobs" min="1" placeholder="2" /></div>
+                <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="minibia-bot-auto-spell-cooldown" min="500" placeholder="2000" /></div>
+              </div>
+              <span class="mb-small-note" id="minibia-bot-auto-spell-status">Status: parado</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Tools -->
+        <div class="mb-tab-content" data-tab="tools">
+          <div class="mb-group"><span class="mb-group-title">Xray</span>
+            <div class="mb-stack">
+              <div class="mb-actions-inline-two"><button type="button" id="minibia-bot-xray-overlay-toggle">Enable Overlay</button><select id="minibia-bot-xray-floor-select"><option value="all">All floors</option></select></div>
+              <span class="mb-small-note" id="minibia-bot-xray-overlay-status">Overlay: off</span>
+              <div class="mb-list" id="minibia-bot-visible-creatures-list"></div>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Auto Talk (Gemini)</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-talk-enabled" /><span>Enable Auto Reply</span></label>
+              <div class="mb-field"><span class="mb-field-label">Gemini API Key</span><input type="password" id="minibia-bot-talk-api-key" placeholder="API key" style="width:100%" /></div>
+              <div class="mb-field"><span class="mb-field-label">Reply Prompt</span><textarea id="minibia-bot-talk-prompt" placeholder="Reply style prompt" style="width:100%"></textarea></div>
+              <span class="mb-small-note" id="minibia-bot-talk-status">Status: idle</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Config -->
+        <div class="mb-tab-content" data-tab="config">
+          <div class="mb-group"><span class="mb-group-title">Profiles</span>
+            <div class="mb-stack">
+              <span class="mb-small-note" id="minibia-bot-profiles-active">Active: none</span>
+              <div class="mb-field"><span class="mb-field-label">Profile Name</span><input type="text" id="minibia-bot-profiles-name-input" placeholder="e.g. Mage lvl 100" style="width:100%" /></div>
+              <div class="mb-actions-inline-two"><button type="button" id="minibia-bot-profiles-save">Save Current</button><button type="button" id="minibia-bot-profiles-load">Load</button></div>
+              <div class="mb-field"><span class="mb-field-label">Saved Profiles</span><select id="minibia-bot-profiles-select" style="width:100%"></select></div>
+              <div class="mb-actions-inline-two"><button type="button" id="minibia-bot-profiles-delete">Delete</button><button type="button" id="minibia-bot-profiles-export">Export JSON</button></div>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Export / Import Config</span>
+            <div class="mb-stack">
+              <span class="mb-small-note">Exporta/importa todas as configurações do bot (heal, cave, attack, etc). Útil para fazer backup ou migrar para outro PC.</span>
+              <div class="mb-actions-inline-two">
+                <button type="button" id="minibia-bot-export-config">Exportar Config</button>
+                <button type="button" id="minibia-bot-import-config">Importar Config</button>
+              </div>
+              <span class="mb-small-note" id="minibia-bot-config-status"></span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Bot</span>
+            <div class="mb-stack"><button type="button" id="minibia-bot-reload">Reload Bot</button></div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mb-statusbar">
+        <div class="mb-statuspanel" id="minibia-bot-status-hp">HP: --</div>
+        <div class="mb-statuspanel" id="minibia-bot-status-mana">MP: --</div>
+        <div class="mb-statuspanel" id="minibia-bot-status-run">Idle</div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+
+    const unlockAudio=()=>bot.unlockAudio?.();
+    panel.addEventListener("pointerdown",unlockAudio,{passive:true});
+    panel.addEventListener("keydown",unlockAudio);
+    bot.addCleanup(()=>{panel.removeEventListener("pointerdown",unlockAudio);panel.removeEventListener("keydown",unlockAudio);});
+
+    applySavedPanelPosition(panel);
+    enableDrag(panel);
+    setPanelCollapsed(panel, getSavedPanelCollapsed());
+    initAccordions(panel);
+
+    const activeTabKey="minibiaBot.ui.activeTab";
+    function switchTab(tabId){panel.querySelectorAll(".mb-tab").forEach(t=>t.classList.toggle("mb-tab-active",t.dataset.tab===tabId));panel.querySelectorAll(".mb-tab-content").forEach(c=>c.classList.toggle("mb-tab-active",c.dataset.tab===tabId));bot.storage.set(activeTabKey,tabId);}
+    panel.querySelectorAll(".mb-tab").forEach(tab=>tab.addEventListener("click",()=>switchTab(tab.dataset.tab)));
+    switchTab(bot.storage.get(activeTabKey,"heal"));
+
+    // Status bar
+    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autoStack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
+    bot.addCleanup(()=>window.clearInterval(sbt));
+
+    // ── Collapse ──────────────────────────────────────────────
+    panel.querySelector("#minibia-bot-collapse")?.addEventListener("click",()=>setPanelCollapsed(panel,panel.dataset.collapsed!=="true"));
+    panel.querySelector("#minibia-bot-reload")?.addEventListener("click",()=>window.minibiaBotReload?.());
+    panel.querySelector("#minibia-bot-set-home")?.addEventListener("click",()=>{bot.pz.setHomePzCurrentSpot();refreshHomeLabel();});
+
+    // ── Export/Import Config ──────────────────────────────────
+    panel.querySelector("#minibia-bot-export-config")?.addEventListener("click",async()=>{
+      const json=exportConfig(); let copied=false;
+      try{if(navigator?.clipboard?.writeText){await navigator.clipboard.writeText(json);copied=true;}}catch(e){}
+      const lbl=document.getElementById("minibia-bot-config-status");
+      if(copied){if(lbl)lbl.textContent="✓ Config copiada para o clipboard!";}
+      else{window.prompt("Copie o JSON abaixo:",json);}
+    });
+    panel.querySelector("#minibia-bot-import-config")?.addEventListener("click",()=>{
+      const json=window.prompt("Cole o JSON de config aqui:");
+      if(!json) return;
+      const lbl=document.getElementById("minibia-bot-config-status");
+      if(importConfig(json)){if(lbl)lbl.textContent="✓ Config importada! Recarregue o bot.";setTimeout(()=>window.minibiaBotReload?.(),1000);}
+      else{if(lbl)lbl.textContent="✗ JSON inválido.";}
+    });
+
+    // ── Heal ──────────────────────────────────────────────────
+    const hpThreshold1I=panel.querySelector("#minibia-bot-hp-threshold1");
+    const hpHotkey1I=panel.querySelector("#minibia-bot-hp-hotkey1");
+    const hpThreshold2I=panel.querySelector("#minibia-bot-hp-threshold2");
+    const hpHotkey2I=panel.querySelector("#minibia-bot-hp-hotkey2");
+    const manaThresholdI=panel.querySelector("#minibia-bot-mana-threshold");
+    const manaHotkeyI=panel.querySelector("#minibia-bot-mana-hotkey");
+    const healEnabledI=panel.querySelector("#minibia-bot-auto-heal-enabled");
+    if(hpThreshold1I){hpThreshold1I.value=String(bot.heal?.config?.hpThreshold1??90);hpThreshold1I.addEventListener("change",()=>{const v=Math.min(100,Math.max(1,Number(hpThreshold1I.value)||90));hpThreshold1I.value=String(v);bot.heal.updateConfig({hpThreshold1:v});});}
+    if(hpHotkey1I){hpHotkey1I.value=String(bot.heal?.config?.hpHotbarSlot1??1);hpHotkey1I.addEventListener("change",()=>{const v=Math.min(12,Math.max(1,Number(hpHotkey1I.value)||1));hpHotkey1I.value=String(v);bot.heal.updateConfig({hpHotbarSlot1:v});});}
+    if(hpThreshold2I){hpThreshold2I.value=String(bot.heal?.config?.hpThreshold2??60);hpThreshold2I.addEventListener("change",()=>{const v=Math.min(100,Math.max(1,Number(hpThreshold2I.value)||60));hpThreshold2I.value=String(v);bot.heal.updateConfig({hpThreshold2:v});});}
+    if(hpHotkey2I){hpHotkey2I.value=String(bot.heal?.config?.hpHotbarSlot2??2);hpHotkey2I.addEventListener("change",()=>{const v=Math.min(12,Math.max(1,Number(hpHotkey2I.value)||2));hpHotkey2I.value=String(v);bot.heal.updateConfig({hpHotbarSlot2:v});});}
+    if(manaThresholdI){manaThresholdI.value=String(bot.heal?.config?.manaThreshold??50);manaThresholdI.addEventListener("change",()=>{const v=Math.min(100,Math.max(1,Number(manaThresholdI.value)||50));manaThresholdI.value=String(v);bot.heal.updateConfig({manaThreshold:v});});}
+    if(manaHotkeyI){manaHotkeyI.value=String(bot.heal?.config?.manaHotbarSlot??3);manaHotkeyI.addEventListener("change",()=>{const v=Math.min(12,Math.max(1,Number(manaHotkeyI.value)||3));manaHotkeyI.value=String(v);bot.heal.updateConfig({manaHotbarSlot:v});});}
+    const healCooldownI=panel.querySelector("#minibia-bot-heal-cooldown");
+    const healRetryI=panel.querySelector("#minibia-bot-heal-retry");
+    if(healCooldownI){healCooldownI.value=String(bot.heal?.config?.healCooldownMs??100);healCooldownI.addEventListener("change",()=>{const v=Math.max(50,Number(healCooldownI.value)||100);healCooldownI.value=String(v);bot.heal.updateConfig({healCooldownMs:v});});}
+    if(healRetryI){healRetryI.value=String(bot.heal?.config?.healRetryMs??100);healRetryI.addEventListener("change",()=>{const v=Math.max(50,Number(healRetryI.value)||100);healRetryI.value=String(v);bot.heal.updateConfig({healRetryMs:v});});}
+    if(healEnabledI){
+      healEnabledI.checked=!!bot.heal?.status?.().running;
+      healEnabledI.addEventListener("change",()=>{
+        if(healEnabledI.checked){
+          bot.heal.start({
+            hpThreshold1  : Math.min(100,Math.max(1,Number(hpThreshold1I?.value)||90)),
+            hpHotbarSlot1 : Math.min(12,Math.max(1,Number(hpHotkey1I?.value)||1)),
+            hpThreshold2  : Math.min(100,Math.max(1,Number(hpThreshold2I?.value)||60)),
+            hpHotbarSlot2 : Math.min(12,Math.max(1,Number(hpHotkey2I?.value)||2)),
+            manaThreshold : Math.min(100,Math.max(1,Number(manaThresholdI?.value)||50)),
+            manaHotbarSlot: Math.min(12,Math.max(1,Number(manaHotkeyI?.value)||3)),
+            healCooldownMs: Math.max(50,Number(healCooldownI?.value)||100),
+            healRetryMs   : Math.max(50,Number(healRetryI?.value)||100),
+          });
+        } else { bot.heal.stop(); }
+        refreshAutoHealStatus();
+      });
+    }
+
+    // ── Eat ───────────────────────────────────────────────────
+    const eatHotkeyI=panel.querySelector("#minibia-bot-auto-eat-hotkey");
+    const eatEnabledI=panel.querySelector("#minibia-bot-auto-eat-enabled");
+    if(eatHotkeyI){eatHotkeyI.value=String(bot.eat?.config?.eatHotbarSlot??10);eatHotkeyI.addEventListener("change",()=>{const v=Math.min(12,Math.max(1,Number(eatHotkeyI.value)||1));eatHotkeyI.value=String(v);bot.eat.updateConfig({eatHotbarSlot:v});});}
+    if(eatEnabledI){eatEnabledI.checked=!!bot.eat?.status?.().running;eatEnabledI.addEventListener("change",()=>{const s=Math.min(12,Math.max(1,Number(eatHotkeyI?.value)||bot.eat.config.eatHotbarSlot||1));if(eatEnabledI.checked)bot.eat.start({eatHotbarSlot:s});else bot.eat.stop();refreshAutoEatStatus();});}
+
+    // ── Invisible / MagicShield / EquipRing ───────────────────
+    const invI=panel.querySelector("#minibia-bot-auto-invisible-enabled");
+    if(invI){invI.checked=!!bot.invisible?.status?.().running;invI.addEventListener("change",()=>{if(invI.checked)bot.invisible.start();else bot.invisible.stop();refreshAutoInvisibleStatus();});}
+    const msI=panel.querySelector("#minibia-bot-auto-magic-shield-enabled");
+    if(msI){msI.checked=!!bot.magicShield?.status?.().running;msI.addEventListener("change",()=>{if(msI.checked)bot.magicShield.start();else bot.magicShield.stop();refreshAutoMagicShieldStatus();});}
+    const erI=panel.querySelector("#minibia-bot-equip-ring-enabled");
+    if(erI){erI.checked=!!bot.equipRing?.status?.().running;erI.addEventListener("change",()=>{if(erI.checked)bot.equipRing.start();else bot.equipRing.stop();refreshEquipRingStatus();});}
+
+    // ── Auto Stack ────────────────────────────────────────────
+    const asTickI=panel.querySelector("#minibia-bot-auto-stack-tick");
+    const asNowB=panel.querySelector("#minibia-bot-auto-stack-now");
+    const asEnabledI=panel.querySelector("#minibia-bot-auto-stack-enabled");
+    if(asTickI){asTickI.value=String(bot.autoStack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autoStack?.updateConfig?.({tickMs:v});});}
+    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autoStack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
+    if(asEnabledI){asEnabledI.checked=!!bot.autoStack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autoStack?.start?.({tickMs:t});else bot.autoStack?.stop?.();refreshAutoStackStatus();});}
+
+    // ── Auto Ring por Cap ─────────────────────────────────────
+    const capMinI=panel.querySelector("#mb-capring-min");
+    const capPutI=panel.querySelector("#mb-capring-put");
+    const capCdI=panel.querySelector("#mb-capring-cd");
+    const capEnI=panel.querySelector("#mb-capring-enabled");
+    const capClrB=panel.querySelector("#mb-capring-clear-origin");
+    if(capMinI){capMinI.value=String(bot.autoRingByCap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoRingByCap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
+    if(capPutI){capPutI.value=String(bot.autoRingByCap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoRingByCap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
+    if(capCdI){capCdI.value=String(bot.autoRingByCap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoRingByCap?.updateConfig?.({equipCooldownMs:v});});}
+    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
+    if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
+
+    // ── Haste ────────────────────────────────────────────
+    const hasteSpellI=panel.querySelector("#mb-haste-spell");
+    const hasteEnI=panel.querySelector("#mb-haste-enabled");
+    if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
+    if(hasteEnI){hasteEnI.checked=!!bot.haste?.status?.().running;hasteEnI.addEventListener("change",()=>{if(hasteEnI.checked)bot.haste?.start?.({spellwords:hasteSpellI?.value?.trim()||"utani hur"});else bot.haste?.stop?.();refreshHasteStatus();});}
+
+    // ── Rune ──────────────────────────────────────────────────
+    const spellI=panel.querySelector("#minibia-bot-rune-spell");
+    const manaMinI=panel.querySelector("#minibia-bot-rune-mana-min");
+    const manaMaxI=panel.querySelector("#minibia-bot-rune-mana-max");
+    const runeI=panel.querySelector("#minibia-bot-rune-enabled");
+    if(spellI){spellI.value=bot.rune?.config?.runeSpellWords||"";spellI.addEventListener("change",()=>bot.rune.updateConfig({runeSpellWords:spellI.value.trim()}));}
+    function syncRuneMana(r=bot.rune?.config){if(!r)return;const mn=Math.max(0,Number(r.runeManaMin??r.runeManaCost)||0);const mx=Math.max(0,Number(r.runeManaMax??r.runeManaCost)||0);if(manaMinI)manaMinI.value=String(Math.min(mn,mx));if(manaMaxI)manaMaxI.value=String(Math.max(mn,mx));}
+    syncRuneMana();
+    manaMinI?.addEventListener("change",()=>{bot.rune.updateConfig({runeManaMin:Math.max(0,Number(manaMinI.value)||0),runeManaMax:Math.max(0,Number(manaMaxI?.value)||0)});syncRuneMana(bot.rune.config);});
+    manaMaxI?.addEventListener("change",()=>{bot.rune.updateConfig({runeManaMin:Math.max(0,Number(manaMinI?.value)||0),runeManaMax:Math.max(0,Number(manaMaxI.value)||0)});syncRuneMana(bot.rune.config);});
+    if(runeI){runeI.checked=!!bot.rune?.status?.().running;runeI.addEventListener("change",()=>{if(runeI.checked)bot.rune.start({runeSpellWords:spellI?.value?.trim()||bot.rune.config.runeSpellWords,runeManaMin:Math.max(0,Number(manaMinI?.value)||0),runeManaMax:Math.max(0,Number(manaMaxI?.value)||0)});else bot.rune.stop();refreshRuneStatus();});}
+
+    // ── Attack ────────────────────────────────────────────────
+    const atkDistI=panel.querySelector("#minibia-bot-auto-attack-max-distance");
+    const atkHkI=panel.querySelector("#minibia-bot-auto-attack-hotkey");
+    const atkRuneHkI=panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
+    const atkMeleeI=panel.querySelector("#minibia-bot-auto-attack-melee");
+    const atkSkillI=panel.querySelector("#minibia-bot-auto-attack-skill-train");
+    const atkTargetI=panel.querySelector("#minibia-bot-auto-attack-target-input");
+    const atkTargetAddB=panel.querySelector("#minibia-bot-auto-attack-target-add");
+    const atkEnabledI=panel.querySelector("#minibia-bot-auto-attack-enabled");
+    if(atkDistI){atkDistI.value=String(bot.attack?.config?.maxTargetDistance??6);atkDistI.addEventListener("change",()=>{const v=Math.min(15,Math.max(1,Math.trunc(Number(atkDistI.value)||6)));atkDistI.value=String(v);bot.attack.updateConfig({maxTargetDistance:v});});}
+    if(atkHkI){atkHkI.value=String(bot.attack?.config?.targetHotbarSlot??3);atkHkI.addEventListener("change",()=>{const v=Math.min(12,Math.max(1,Number(atkHkI.value)||1));atkHkI.value=String(v);bot.attack.updateConfig({targetHotbarSlot:v});});}
+    if(atkRuneHkI){atkRuneHkI.value=bot.attack?.config?.runeHotbarSlot?String(bot.attack.config.runeHotbarSlot):"";atkRuneHkI.addEventListener("change",()=>{const r=Number(atkRuneHkI.value);const v=Number.isFinite(r)&&r>=1&&r<=12?Math.trunc(r):null;atkRuneHkI.value=v?String(v):"";bot.attack.updateConfig({runeHotbarSlot:v});});}
+    if(atkMeleeI){atkMeleeI.checked=bot.attack?.config?.meleeMode!==false;atkMeleeI.addEventListener("change",()=>bot.attack.updateConfig({meleeMode:atkMeleeI.checked}));}
+    if(atkSkillI){atkSkillI.checked=!!bot.attack?.config?.skillTrainOnMonster;atkSkillI.addEventListener("change",()=>bot.attack.updateConfig({skillTrainOnMonster:atkSkillI.checked}));}
+    function addAttackTarget(){const raw=atkTargetI?.value?.trim()||"";if(!raw)return;const cur=bot.attack?.config?.targetNames||[];if(!cur.some(n=>n.trim().toLowerCase()===raw.toLowerCase()))bot.attack.updateConfig({targetNames:[...cur,raw]});if(atkTargetI)atkTargetI.value="";renderAttackTargetNames();}
+    atkTargetAddB?.addEventListener("click",addAttackTarget);
+    atkTargetI?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addAttackTarget();}});
+    const atkRuneCdI=panel.querySelector("#minibia-bot-auto-attack-rune-cooldown");
+    if(atkRuneCdI){atkRuneCdI.value=String(bot.attack?.config?.runeCooldownMs??1200);atkRuneCdI.addEventListener("change",()=>{const v=Math.max(200,Number(atkRuneCdI.value)||1200);atkRuneCdI.value=String(v);bot.attack.updateConfig({runeCooldownMs:v});});}
+    if(atkEnabledI){atkEnabledI.checked=!!bot.attack?.status?.().running;atkEnabledI.addEventListener("change",()=>{const th=Math.min(12,Math.max(1,Number(atkHkI?.value)||bot.attack.config.targetHotbarSlot||1));const rh=(()=>{const r=Number(atkRuneHkI?.value);return Number.isFinite(r)&&r>=1&&r<=12?Math.trunc(r):bot.attack.config.runeHotbarSlot??null;})();const ml=!!atkMeleeI?.checked;const st=!!atkSkillI?.checked;const md=Math.min(15,Math.max(1,Math.trunc(Number(atkDistI?.value)||bot.attack.config.maxTargetDistance||6)));const rc=Math.max(200,Number(atkRuneCdI?.value)||bot.attack.config.runeCooldownMs||1200);if(atkEnabledI.checked)bot.attack.start({targetHotbarSlot:th,runeHotbarSlot:rh,meleeMode:ml,skillTrainOnMonster:st,maxTargetDistance:md,runeCooldownMs:rc});else bot.attack.stop();refreshAutoAttackStatus();});}
+
+    // ── Distance Attack ───────────────────────────────────────
+    const daKeepI=panel.querySelector("#minibia-bot-distance-keep");
+    const daHkI=panel.querySelector("#minibia-bot-distance-hotkey");
+    const daCdI=panel.querySelector("#minibia-bot-distance-cooldown");
+    const daEnabledI=panel.querySelector("#minibia-bot-distance-attack-enabled");
+    if(daKeepI){daKeepI.value=String(bot.distanceAttack?.config?.keepDistance??3);daKeepI.addEventListener("change",()=>{const v=Math.max(1,Math.min(10,Number(daKeepI.value)||3));daKeepI.value=String(v);bot.distanceAttack?.updateConfig?.({keepDistance:v});});}
+    if(daHkI){daHkI.value=String(bot.distanceAttack?.config?.runeHotbarSlot??4);daHkI.addEventListener("change",()=>{const v=Math.max(1,Math.min(12,Number(daHkI.value)||4));daHkI.value=String(v);bot.distanceAttack?.updateConfig?.({runeHotbarSlot:v});});}
+    if(daCdI){daCdI.value=String(bot.distanceAttack?.config?.runeCooldownMs??1200);daCdI.addEventListener("change",()=>{const v=Math.max(200,Number(daCdI.value)||1200);daCdI.value=String(v);bot.distanceAttack?.updateConfig?.({runeCooldownMs:v});});}
+    if(daEnabledI){daEnabledI.checked=!!bot.distanceAttack?.status?.().running;daEnabledI.addEventListener("change",()=>{if(daEnabledI.checked)bot.distanceAttack?.start?.({keepDistance:Math.max(1,Math.min(10,Number(daKeepI?.value)||3)),runeHotbarSlot:Math.max(1,Math.min(12,Number(daHkI?.value)||4)),runeCooldownMs:Math.max(200,Number(daCdI?.value)||1200)});else bot.distanceAttack?.stop?.();refreshDistanceAttackStatus();});}
+
+    // ── Melee Position ───────────────────────────────────────
+    const meleeEI   = panel.querySelector("#mb-melee-enabled");
+    const meleeSlotI= panel.querySelector("#mb-melee-slot");
+    const meleeCdI  = panel.querySelector("#mb-melee-cd");
+    const meleeModeI= panel.querySelector("#mb-melee-mode");
+    const meleeReqI = panel.querySelector("#mb-melee-require");
+    function refreshMeleePosition() {
+      const s = bot.meleePosition?.status?.();
+      if(meleeEI) meleeEI.checked = !!s?.running;
+      const l = document.getElementById("mb-melee-status");
+      if(l) {
+        if(s?.running) {
+          const adj = s.isAdjacent ? "✓ adjacente" : "✗ movendo...";
+          const tgt = s.currentTarget ? `${s.currentTarget.name} (${s.currentTarget.direction})` : "nenhum";
+          l.textContent = `Status: ativo • ${adj} • alvo: ${tgt}`;
+        } else { l.textContent = "Status: parado"; }
+      }
+    }
+    if(meleeSlotI){meleeSlotI.value=String(bot.meleePosition?.config?.spellHotbarSlot??5);meleeSlotI.addEventListener("change",()=>{const v=Math.max(1,Math.min(12,Number(meleeSlotI.value)||5));meleeSlotI.value=String(v);bot.meleePosition?.updateConfig?.({spellHotbarSlot:v});});}
+    if(meleeCdI){meleeCdI.value=String(bot.meleePosition?.config?.spellCooldownMs??2000);meleeCdI.addEventListener("change",()=>{const v=Math.max(200,Number(meleeCdI.value)||2000);meleeCdI.value=String(v);bot.meleePosition?.updateConfig?.({spellCooldownMs:v});});}
+    if(meleeModeI){meleeModeI.value=bot.meleePosition?.config?.mode||"any";meleeModeI.addEventListener("change",()=>bot.meleePosition?.updateConfig?.({mode:meleeModeI.value}));}
+    if(meleeReqI){meleeReqI.value=String(bot.meleePosition?.config?.requireAdjacent!==false);meleeReqI.addEventListener("change",()=>bot.meleePosition?.updateConfig?.({requireAdjacent:meleeReqI.value==="true"}));}
+    if(meleeEI){meleeEI.checked=!!bot.meleePosition?.status?.().running;meleeEI.addEventListener("change",()=>{if(meleeEI.checked)bot.meleePosition?.start?.({spellHotbarSlot:Math.max(1,Math.min(12,Number(meleeSlotI?.value)||5)),spellCooldownMs:Math.max(200,Number(meleeCdI?.value)||2000),mode:meleeModeI?.value||"any",requireAdjacent:meleeReqI?.value!=="false"});else bot.meleePosition?.stop?.();refreshMeleePosition();});}
+    const meleeTid=window.setInterval(refreshMeleePosition,1000); bot.addCleanup(()=>window.clearInterval(meleeTid));
+    refreshMeleePosition();
+
+    // ── Follow ────────────────────────────────────────────────
+    const followEI=panel.querySelector("#minibia-bot-follow-enabled");
+    const followTI=panel.querySelector("#minibia-bot-follow-target");
+    const followDI=panel.querySelector("#minibia-bot-follow-distance");
+    if(followTI){followTI.value=bot.follow?.config?.targetPlayerName||"";followTI.addEventListener("change",()=>{bot.follow?.updateConfig?.({targetPlayerName:followTI.value.trim()});refreshFollowStatus();});}
+    if(followDI){followDI.value=String(bot.follow?.config?.followDistance??2);followDI.addEventListener("change",()=>{const d=Math.max(0,Math.min(10,Math.trunc(Number(followDI.value)||0)));followDI.value=String(d);bot.follow?.updateConfig?.({followDistance:d});refreshFollowStatus();});}
+    if(followEI){followEI.checked=!!bot.follow?.status?.().running;followEI.addEventListener("change",()=>{const n=followTI?.value?.trim()||bot.follow?.config?.targetPlayerName||"";const d=Math.max(0,Math.min(10,Math.trunc(Number(followDI?.value)||2)));if(followEI.checked)bot.follow?.start?.({targetPlayerName:n,followDistance:d});else bot.follow?.stop?.();refreshFollowStatus();});}
+
+    // ── Cave ──────────────────────────────────────────────────
+    panel.querySelector("#minibia-bot-cave-record")?.addEventListener("click",()=>{bot.cave.addWaypointCurrentSpot();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();});
+    panel.querySelector("#minibia-bot-cave-add-delay")?.addEventListener("click",()=>{const r=window.prompt("Delay in seconds:","90");if(r==null)return;const s=Math.max(1,Math.trunc(Number(r)||0));if(!Number.isFinite(s)||s<=0){window.alert("Invalid number.");return;}bot.cave.addDelay(s);refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
+    panel.querySelector("#minibia-bot-cave-remove-last")?.addEventListener("click",()=>{bot.cave.removeLastWaypoint();refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
+    const cpucI=panel.querySelector("#minibia-bot-cave-pause-until-clear");
+    if(cpucI){cpucI.checked=bot.cave?.config?.pauseUntilClear!==false;cpucI.addEventListener("change",()=>{bot.cave.updateConfig({pauseUntilClear:cpucI.checked});refreshCaveStatus();});}
+    // ── NOVOS CONTROLES: Strict Mode ──────────────────────────
+    const caveStrictModeI=panel.querySelector("#minibia-bot-cave-strict-mode");
+    if(caveStrictModeI){caveStrictModeI.checked=!!bot.cave?.config?.strictMode;caveStrictModeI.addEventListener("change",()=>{bot.cave.updateConfig({strictMode:caveStrictModeI.checked});refreshCaveStatus();});}
+    const caveLoopTypeI=panel.querySelector("#minibia-bot-cave-loop-type");
+    if(caveLoopTypeI){caveLoopTypeI.value=bot.cave?.config?.loopType||"reverse";caveLoopTypeI.addEventListener("change",()=>{bot.cave.updateConfig({loopType:caveLoopTypeI.value});refreshCaveStatus();});}
+    const caveMaxProximitySkipI=panel.querySelector("#minibia-bot-cave-max-proximity-skip");
+    if(caveMaxProximitySkipI){caveMaxProximitySkipI.value=String(bot.cave?.config?.maxProximitySkip??3);caveMaxProximitySkipI.addEventListener("change",()=>{const v=Math.max(1,Math.trunc(Number(caveMaxProximitySkipI.value)||3));caveMaxProximitySkipI.value=String(v);bot.cave.updateConfig({maxProximitySkip:v});refreshCaveStatus();});}
+    // ─────────────────────────────────────────────────────────
+    const csoI=panel.querySelector("#minibia-bot-cave-spawn-floor-offset");
+    if(csoI){csoI.value=String(bot.cave?.config?.pauseUntilSpawnFloorOffset??1);csoI.addEventListener("change",()=>{const v=Math.trunc(Number(csoI.value)||0);csoI.value=String(v);bot.cave.updateConfig({pauseUntilSpawnFloorOffset:v});refreshCaveStatus();});}
+    const cpusI=panel.querySelector("#minibia-bot-cave-pause-until-spawn");
+    if(cpusI){cpusI.checked=!!bot.cave?.config?.pauseUntilSpawn;cpusI.addEventListener("change",()=>{bot.cave.updateConfig({pauseUntilSpawn:cpusI.checked,pauseUntilSpawnFloorOffset:Math.trunc(Number(csoI?.value)||bot.cave?.config?.pauseUntilSpawnFloorOffset||0)});refreshCaveStatus();});}
+    panel.querySelector("#minibia-bot-cave-start")?.addEventListener("click",()=>{bot.cave.start();refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
+    panel.querySelector("#minibia-bot-cave-stop")?.addEventListener("click",()=>{bot.cave.stop();refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
+    const cpsI=panel.querySelector("#minibia-bot-cave-preset-select");
+    cpsI?.addEventListener("change",()=>{const n=cpsI.value||"";if(!n||n===bot.cave?.getActivePresetName?.())return;bot.cave.loadPreset(n);refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();refreshCaveTransitionStatus();});
+    panel.querySelector("#minibia-bot-cave-preset-new")?.addEventListener("click",()=>{const n=window.prompt("Name the new cave preset:");if(n==null)return;if(!bot.cave.createPreset(n))return;refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
+    panel.querySelector("#minibia-bot-cave-preset-delete")?.addEventListener("click",()=>{const n=cpsI?.value||"";if(!n)return;if(!bot.cave.deletePreset(n))return;refreshCavePresetControls();refreshCaveStatus();});
     panel.querySelector("#minibia-bot-cave-preset-export")?.addEventListener("click",async()=>{const p=bot.cave?.exportPresets?.();if(!p){window.alert("Could not export.");return;}const s=JSON.stringify(p,null,2);let c=false;try{if(navigator?.clipboard?.writeText){await navigator.clipboard.writeText(s);c=true;}}catch(e){}if(c){window.alert("Cave presets copied to clipboard.");}else{window.prompt("Copy your cave presets JSON:",s);}});
     panel.querySelector("#minibia-bot-cave-preset-import")?.addEventListener("click",()=>{const i=window.prompt("Paste cave presets JSON:");if(i==null)return;const im=bot.cave?.importPresets?.(i);if(!im){window.alert("Import failed.");return;}refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();refreshCaveTransitionStatus();window.alert("Imported "+(im.presets?.length||0)+" preset(s).");});
 
@@ -7476,12 +9800,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -7493,13 +9817,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshautostackStatus, refreshCapRingStatus, refreshHasteStatus,
+    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus, refreshHasteStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
   };
 };
-
 (() => {
   const bundle = window.__minibiaBotBundle || window.__minibiaBotReloadBundle || {};
   const persistedEnabledModules = [
@@ -7513,9 +9836,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["eat",           "minibiaBot.eat.config"],
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
-    ["autostack",     "minibiaBot.autostack.config"],
-    ["autoringbycap", "minibiaBot.autoringbycap.config"],
-    ["haste",          "minibiaBot.haste.config"],
+    ["autoStack",     "minibiaBot.autoStack.config"],
+    ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
+    ["haste",     "minibiaBot.haste.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -7565,8 +9888,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installAutoEatModule(bot);
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
-    currentBundle.installautostackModule(bot);
-    currentBundle.installautoringbycapModule(bot);
+    currentBundle.installAutoStackModule(bot);
+    currentBundle.installAutoRingByCapModule(bot);
     currentBundle.installastemodule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
@@ -7581,28 +9904,28 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     bot.stop   = (...args) => bot.rune.stop(...args);
     bot.reload = () => window.minibiaBotReload?.();
     bot.status = () => ({
-      version:        bot.version,
-      pz:             { home: bot.pz.getHomePz() },
-      xray:           bot.xray.status(),
-      panic:          bot.panic.status(),
-      rune:           bot.rune.status(),
-      heal:           bot.heal.status(),
-      invisible:      bot.invisible.status(),
-      magicShield:    bot.magicShield.status(),
-      attack:         bot.attack.status(),
-      cave:           bot.cave.status(),
-      equipRing:      bot.equipRing.status(),
-      eat:            bot.eat.status(),
-      talk:           bot.talk.status(),
-      follow:         bot.follow.status(),
-      autostack:      bot.autostack.status(),
-      autoringbycap:  bot.autoringbycap.status(),
-      haste:          bot.haste.status(),
-      friendHeal:     bot.friendHeal.status(),
-      autoSpell:      bot.autoSpell.status(),
-      distanceAttack:  bot.distanceAttack.status(),
-      meleePosition:   bot.meleePosition.status(),
-      profiles:        bot.profiles.status(),
+      version        : bot.version,
+      pz             : { home: bot.pz.getHomePz() },
+      xray           : bot.xray.status(),
+      panic          : bot.panic.status(),
+      rune           : bot.rune.status(),
+      heal           : bot.heal.status(),
+      invisible      : bot.invisible.status(),
+      magicShield    : bot.magicShield.status(),
+      attack         : bot.attack.status(),
+      cave           : bot.cave.status(),
+      equipRing      : bot.equipRing.status(),
+      eat            : bot.eat.status(),
+      talk           : bot.talk.status(),
+      follow         : bot.follow.status(),
+      autoStack      : bot.autoStack.status(),
+      autoRingByCap  : bot.autoRingByCap.status(),
+      haste      : bot.haste.status(),
+      friendHeal     : bot.friendHeal.status(),
+      autoSpell      : bot.autoSpell.status(),
+      distanceAttack : bot.distanceAttack.status(),
+      meleePosition  : bot.meleePosition.status(),
+      profiles       : bot.profiles.status(),
     });
 
     window.minibiaBot = bot;
