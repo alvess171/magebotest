@@ -727,11 +727,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const cpucI=panel.querySelector("#minibia-bot-cave-pause-until-clear");
     if(cpucI){cpucI.checked=bot.cave?.config?.pauseUntilClear!==false;cpucI.addEventListener("change",()=>{bot.cave.updateConfig({pauseUntilClear:cpucI.checked});refreshCaveStatus();});}
     const caveStrictModeI=panel.querySelector("#minibia-bot-cave-strict-mode");
-    if(caveStrictModeI){caveStrictModeI.checked=!!bot.cave?.config?.strictMode;caveStrictModeI.addEventListener("change",()=>{bot.cave.updateConfig({strictMode:caveStrictModeI.checked});refreshCaveStatus();});}
+    if(caveStrictModeI){caveStrictModeI.checked=!!bot.cave?.config?.strictMode;caveStrictModeI.addEventListener("change",()=>{bot.cave.updateConfig({strictMode:caveStrictModeI.checked});caveLoopTypeI.disabled=!caveStrictModeI.checked;caveMaxProximitySkipI.disabled=!caveStrictModeI.checked;refreshCaveStatus();});}
     const caveLoopTypeI=panel.querySelector("#minibia-bot-cave-loop-type");
-    if(caveLoopTypeI){caveLoopTypeI.value=bot.cave?.config?.loopType||"reverse";caveLoopTypeI.addEventListener("change",()=>{bot.cave.updateConfig({loopType:caveLoopTypeI.value});refreshCaveStatus();});}
+    if(caveLoopTypeI){caveLoopTypeI.value=bot.cave?.config?.loopType||"reverse";caveLoopTypeI.disabled=!bot.cave?.config?.strictMode;caveLoopTypeI.addEventListener("change",()=>{bot.cave.updateConfig({loopType:caveLoopTypeI.value});refreshCaveStatus();});}
     const caveMaxProximitySkipI=panel.querySelector("#minibia-bot-cave-max-proximity-skip");
-    if(caveMaxProximitySkipI){caveMaxProximitySkipI.value=String(bot.cave?.config?.maxProximitySkip??3);caveMaxProximitySkipI.addEventListener("change",()=>{const v=Math.max(1,Math.trunc(Number(caveMaxProximitySkipI.value)||3));caveMaxProximitySkipI.value=String(v);bot.cave.updateConfig({maxProximitySkip:v});refreshCaveStatus();});}
+    if(caveMaxProximitySkipI){caveMaxProximitySkipI.value=String(bot.cave?.config?.maxProximitySkip??3);caveMaxProximitySkipI.disabled=!bot.cave?.config?.strictMode;caveMaxProximitySkipI.addEventListener("change",()=>{const v=Math.max(1,Math.trunc(Number(caveMaxProximitySkipI.value)||3));caveMaxProximitySkipI.value=String(v);bot.cave.updateConfig({maxProximitySkip:v});refreshCaveStatus();});}
     const csoI=panel.querySelector("#minibia-bot-cave-spawn-floor-offset");
     if(csoI){csoI.value=String(bot.cave?.config?.pauseUntilSpawnFloorOffset??1);csoI.addEventListener("change",()=>{const v=Math.trunc(Number(csoI.value)||0);csoI.value=String(v);bot.cave.updateConfig({pauseUntilSpawnFloorOffset:v});refreshCaveStatus();});}
     const cpusI=panel.querySelector("#minibia-bot-cave-pause-until-spawn");
