@@ -12,6 +12,7 @@
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
     ["autoStack",     "minibiaBot.autoStack.config"],
+    ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -62,6 +63,7 @@
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
     currentBundle.installAutoStackModule(bot);
+    currentBundle.installAutoRingByCapModule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
@@ -75,26 +77,27 @@
     bot.stop   = (...args) => bot.rune.stop(...args);
     bot.reload = () => window.minibiaBotReload?.();
     bot.status = () => ({
-      version:        bot.version,
-      pz:             { home: bot.pz.getHomePz() },
-      xray:           bot.xray.status(),
-      panic:          bot.panic.status(),
-      rune:           bot.rune.status(),
-      heal:           bot.heal.status(),
-      invisible:      bot.invisible.status(),
-      magicShield:    bot.magicShield.status(),
-      attack:         bot.attack.status(),
-      cave:           bot.cave.status(),
-      equipRing:      bot.equipRing.status(),
-      eat:            bot.eat.status(),
-      talk:           bot.talk.status(),
-      follow:         bot.follow.status(),
-      autoStack:      bot.autoStack.status(),
-      friendHeal:     bot.friendHeal.status(),
-      autoSpell:      bot.autoSpell.status(),
-      distanceAttack:  bot.distanceAttack.status(),
-      meleePosition:   bot.meleePosition.status(),
-      profiles:        bot.profiles.status(),
+      version        : bot.version,
+      pz             : { home: bot.pz.getHomePz() },
+      xray           : bot.xray.status(),
+      panic          : bot.panic.status(),
+      rune           : bot.rune.status(),
+      heal           : bot.heal.status(),
+      invisible      : bot.invisible.status(),
+      magicShield    : bot.magicShield.status(),
+      attack         : bot.attack.status(),
+      cave           : bot.cave.status(),
+      equipRing      : bot.equipRing.status(),
+      eat            : bot.eat.status(),
+      talk           : bot.talk.status(),
+      follow         : bot.follow.status(),
+      autoStack      : bot.autoStack.status(),
+      autoRingByCap  : bot.autoRingByCap.status(),
+      friendHeal     : bot.friendHeal.status(),
+      autoSpell      : bot.autoSpell.status(),
+      distanceAttack : bot.distanceAttack.status(),
+      meleePosition  : bot.meleePosition.status(),
+      profiles       : bot.profiles.status(),
     });
 
     window.minibiaBot = bot;
