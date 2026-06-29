@@ -413,7 +413,20 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <span class="mb-small-note" id="minibia-bot-cave-closest">Closest: no waypoints</span>
               <span class="mb-small-note" id="minibia-bot-cave-transition-status">Transitions: none</span>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-pause-until-clear" /><span>Pause Until Clear</span></label>
-              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-strict-order" /><span>Ordem Estrita (sem pular waypoints)</span></label>
+              <!-- ── NOVOS CONTROLES: Strict Mode ──────────────────── -->
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-strict-mode" /><span>Strict Mode (inteligente)</span></label>
+              <div class="mb-row-three">
+                <span>Loop Type</span>
+                <select id="minibia-bot-cave-loop-type">
+                  <option value="reverse">Volta (reverse)</option>
+                  <option value="restart">Pula pro 1º (restart)</option>
+                </select>
+              </div>
+              <div class="mb-row-three">
+                <span>Max Proximity Skip</span>
+                <input type="number" id="minibia-bot-cave-max-proximity-skip" min="1" max="10" value="3" placeholder="3" style="width:60px" />
+              </div>
+              <!-- ───────────────────────────────────────────────────── -->
               <div class="mb-row-three"><label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-pause-until-spawn" /><span>Pause Until Monster on Floor</span></label><span></span><input type="number" id="minibia-bot-cave-spawn-floor-offset" placeholder="+1" style="width:50px" /></div>
               <div class="mb-actions-inline-two"><button type="button" id="minibia-bot-cave-start">Start</button><button type="button" id="minibia-bot-cave-stop">Stop</button></div>
               <span class="mb-small-note" id="minibia-bot-cave-status">Status: no waypoints</span>
@@ -724,8 +737,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.querySelector("#minibia-bot-cave-remove-last")?.addEventListener("click",()=>{bot.cave.removeLastWaypoint();refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
     const cpucI=panel.querySelector("#minibia-bot-cave-pause-until-clear");
     if(cpucI){cpucI.checked=bot.cave?.config?.pauseUntilClear!==false;cpucI.addEventListener("change",()=>{bot.cave.updateConfig({pauseUntilClear:cpucI.checked});refreshCaveStatus();});}
-    const caveStrictOrderI=panel.querySelector("#minibia-bot-cave-strict-order");
-    if(caveStrictOrderI){caveStrictOrderI.checked=!!bot.cave?.config?.strictOrder;caveStrictOrderI.addEventListener("change",()=>{bot.cave.updateConfig({strictOrder:caveStrictOrderI.checked});refreshCaveStatus();});}
+    // ── NOVOS CONTROLES: Strict Mode ──────────────────────────
+    const caveStrictModeI=panel.querySelector("#minibia-bot-cave-strict-mode");
+    if(caveStrictModeI){caveStrictModeI.checked=!!bot.cave?.config?.strictMode;caveStrictModeI.addEventListener("change",()=>{bot.cave.updateConfig({strictMode:caveStrictModeI.checked});refreshCaveStatus();});}
+    const caveLoopTypeI=panel.querySelector("#minibia-bot-cave-loop-type");
+    if(caveLoopTypeI){caveLoopTypeI.value=bot.cave?.config?.loopType||"reverse";caveLoopTypeI.addEventListener("change",()=>{bot.cave.updateConfig({loopType:caveLoopTypeI.value});refreshCaveStatus();});}
+    const caveMaxProximitySkipI=panel.querySelector("#minibia-bot-cave-max-proximity-skip");
+    if(caveMaxProximitySkipI){caveMaxProximitySkipI.value=String(bot.cave?.config?.maxProximitySkip??3);caveMaxProximitySkipI.addEventListener("change",()=>{const v=Math.max(1,Math.trunc(Number(caveMaxProximitySkipI.value)||3));caveMaxProximitySkipI.value=String(v);bot.cave.updateConfig({maxProximitySkip:v});refreshCaveStatus();});}
+    // ─────────────────────────────────────────────────────────
     const csoI=panel.querySelector("#minibia-bot-cave-spawn-floor-offset");
     if(csoI){csoI.value=String(bot.cave?.config?.pauseUntilSpawnFloorOffset??1);csoI.addEventListener("change",()=>{const v=Math.trunc(Number(csoI.value)||0);csoI.value=String(v);bot.cave.updateConfig({pauseUntilSpawnFloorOffset:v});refreshCaveStatus();});}
     const cpusI=panel.querySelector("#minibia-bot-cave-pause-until-spawn");
