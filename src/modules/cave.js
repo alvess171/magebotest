@@ -47,7 +47,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
       waypointTolerance: 2,
       waypointLookahead: 12,
-      strictMode: false,    // Modo estrito inteligente
+      strictOrder: false,   // Modo estrito inteligente (checkbox antigo)
       loopType: "reverse",  // "reverse" = volta | "restart" = pula pro 1º
       maxProximitySkip: 3,  // Máximo de waypoints que pode pular por proximidade
       pauseUntilClear: true,
@@ -1351,7 +1351,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
     if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
     if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
-    if ("strictMode" in nextConfig) nextConfig.strictMode = !!nextConfig.strictMode;
+    if ("strictOrder" in nextConfig) nextConfig.strictOrder = !!nextConfig.strictOrder;
     if ("loopType" in nextConfig) nextConfig.loopType = (["reverse", "restart"].includes(String(nextConfig.loopType)) ? nextConfig.loopType : "reverse");
     if ("maxProximitySkip" in nextConfig) nextConfig.maxProximitySkip = Math.max(1, Math.trunc(Number(nextConfig.maxProximitySkip) || 3));
     Object.assign(config, nextConfig);
