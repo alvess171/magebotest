@@ -3724,6 +3724,1451 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   };
 };
 
+window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
+  const configStorageKey = "minibiaBot.cave.config";
+  const routeStorageKey = "minibiaBot.cave.route";
+  const transitionStorageKey = "minibiaBot.cave.transitions";
+  const presetStorageKey = "minibiaBot.cave.presets";
+  const defaultPresetName = "Default";
+  const minimapOverlayRootId = "minibia-bot-cave-minimap-overlay";
+  const minimapOverlayStyleId = "minibia-bot-cave-minimap-overlay-style";
+  const ladderItemIds = new Set([1948, 1968]);
+  const ropeNamePattern = /\brope\b/i;
+  const shovelNamePattern = /\bshovel\b/i;
+  const shovelTargetNamePatterns = [
+    /\bstone pile\b/i,
+    /\bloose stone pile\b/i,
+    /\bgravel pile\b/i,
+    /\bdirt pile\b/i,
+  ];
+  const state = {
+    running: false,
+    timerId: null,
+    observerTimerId: null,
+    currentIndex: 0,
+    direction: 1,
+    lastPathAt: 0,
+    lastPositionKey: null,
+    lastProgressAt: 0,
+    lastStairsUseAt: 0,
+    lastObservedPosition: null,
+    pendingTransitionSource: null,
+    pausedForCombat: false,
+    pausedForCreatures: false,
+    pausedForSpawn: false,
+    delayUntil: 0,
+    delayWaypointIndex: null,
+  };
+  const minimapOverlayState = {
+    timerId: null,
+  };
+
+  // ── VELOCIDADE: valores padrão mais agressivos ──────────────
+  const config = Object.assign(
+    {
+      tickMs: 50,           // tick ultra rápido
+      repathMs: 200,        // recalcula caminho bem mais rápido
+      observerMs: 50,       // detecta mudança de posição bem mais rápido
+      waypointTolerance: 1, // considera chegou com 1 tile de tolerância (mais preciso e rápido)
+      waypointLookahead: 12,
+      pauseUntilClear: true,
+      pauseUntilSpawn: false,
+      strictOrder: false,   // true = ordem estrita sem pulos | false = lookahead (comportamento original)
+      pauseUntilSpawnFloorOffset: 1,
+      enabled: false,
+      activePresetName: defaultPresetName,
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  // NÃO forçamos mais tickMs=500 — deixamos o valor do config valer
+
+  function normalizePresetName(value) {
+    const normalized = String(value || "").trim().replace(/\s+/g, " ");
+    return normalized || null;
+  }
+
+  function cloneValue(value) {
+    return value ? JSON.parse(JSON.stringify(value)) : null;
+  }
+
+  function normalizePreset(value) {
+    if (!value) return null;
+    const name = normalizePresetName(value.name);
+    if (!name) return null;
+    return {
+      name,
+      route: normalizeRoute(value.route),
+      transitions: normalizeTransitions(value.transitions),
+    };
+  }
+
+  function normalizePresets(value) {
+    const entries = Array.isArray(value) ? value : [];
+    const deduped = new Map();
+    entries.map(normalizePreset).filter(Boolean).forEach((preset) => {
+      deduped.set(preset.name.toLowerCase(), preset);
+    });
+    return Array.from(deduped.values());
+  }
+
+  let route = normalizeRoute(bot.storage.get(routeStorageKey, []));
+  let transitions = normalizeTransitions(bot.storage.get(transitionStorageKey, []));
+  let presets = normalizePresets(bot.storage.get(presetStorageKey, []));
+
+  if (!presets.length && (route.length || transitions.length)) {
+    presets = [{
+      name: defaultPresetName,
+      route: route.map((waypoint) => cloneValue(waypoint)),
+      transitions: transitions.map((transition) => cloneValue(transition)),
+    }];
+  }
+
+  function getPresetNames() {
+    return presets.map((preset) => preset.name);
+  }
+
+  function getPresetByName(name) {
+    const normalizedName = normalizePresetName(name);
+    if (!normalizedName) return null;
+    return presets.find((preset) => preset.name.toLowerCase() === normalizedName.toLowerCase()) || null;
+  }
+
+  function getActivePresetName() {
+    const configuredName = normalizePresetName(config.activePresetName);
+    if (configuredName && getPresetByName(configuredName)) {
+      return getPresetByName(configuredName).name;
+    }
+    if (presets.length) return presets[0].name;
+    return configuredName || defaultPresetName;
+  }
+
+  function persistPresets() {
+    bot.storage.set(
+      presetStorageKey,
+      presets.map((preset) => ({
+        name: preset.name,
+        route: preset.route.map((waypoint) => ({ ...waypoint })),
+        transitions: preset.transitions.map((transition) => cloneValue(transition)),
+      }))
+    );
+  }
+
+  function persistLegacyActivePreset() {
+    bot.storage.set(routeStorageKey, route.map((waypoint) => ({ ...waypoint })));
+    bot.storage.set(transitionStorageKey, transitions.map((transition) => cloneValue(transition)));
+  }
+
+  function setActivePresetName(name) {
+    config.activePresetName = normalizePresetName(name) || defaultPresetName;
+    persistConfig();
+    return config.activePresetName;
+  }
+
+  function upsertPreset(name, nextRoute = route, nextTransitions = transitions) {
+    const normalizedName = normalizePresetName(name);
+    if (!normalizedName) return null;
+    const preset = {
+      name: normalizedName,
+      route: normalizeRoute(nextRoute).map((waypoint) => cloneValue(waypoint)),
+      transitions: normalizeTransitions(nextTransitions).map((transition) => cloneValue(transition)),
+    };
+    const existingIndex = presets.findIndex((entry) => entry.name.toLowerCase() === normalizedName.toLowerCase());
+    if (existingIndex >= 0) {
+      presets[existingIndex] = preset;
+    } else {
+      presets.push(preset);
+    }
+    persistPresets();
+    return preset;
+  }
+
+  function persistActivePreset() {
+    upsertPreset(getActivePresetName(), route, transitions);
+    persistLegacyActivePreset();
+  }
+
+  function loadPresetState(name) {
+    const preset = getPresetByName(name);
+    if (!preset) return null;
+    route = normalizeRoute(preset.route);
+    transitions = normalizeTransitions(preset.transitions);
+    state.currentIndex = 0;
+    state.direction = 1;
+    state.pendingTransitionSource = null;
+    setActivePresetName(preset.name);
+    persistLegacyActivePreset();
+    return preset;
+  }
+
+  const initialActivePreset = getActivePresetName();
+  if (loadPresetState(initialActivePreset)) {
+    config.activePresetName = initialActivePreset;
+  } else {
+    setActivePresetName(initialActivePreset);
+  }
+
+  function persistConfig() {
+    bot.storage.set(configStorageKey, { ...config });
+  }
+
+  function persistRoute() {
+    persistActivePreset();
+  }
+
+  function normalizePosition(value) {
+    if (!value) return null;
+    const x = Number(value.x);
+    const y = Number(value.y);
+    const z = Number(value.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+    return { x: Math.trunc(x), y: Math.trunc(y), z: Math.trunc(z) };
+  }
+
+  function normalizeWaypoint(waypoint) {
+    if (!waypoint) return null;
+    const type = String(waypoint.type || "").trim().toLowerCase();
+    if (type === "delay") {
+      const seconds = Math.max(1, Math.trunc(Number(waypoint.seconds)));
+      if (!Number.isFinite(seconds) || seconds <= 0) return null;
+      return { type: "delay", seconds };
+    }
+    const position = normalizePosition(waypoint);
+    if (!position) return null;
+    return { type: "position", ...position };
+  }
+
+  function normalizeRoute(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(normalizeWaypoint).filter(Boolean);
+  }
+
+  function normalizeTransition(transition) {
+    if (!transition) return null;
+    const from = normalizePosition(transition.from || transition);
+    const to = normalizePosition(transition.to || {
+      x: transition.targetX,
+      y: transition.targetY,
+      z: transition.targetZ,
+    });
+    if (!from || !to || from.z === to.z) return null;
+    const count = Math.max(1, Math.trunc(Number(transition.count) || 1));
+    const lastSeenAt = Math.max(0, Math.trunc(Number(transition.lastSeenAt) || Date.now()));
+    return { from, to, count, lastSeenAt };
+  }
+
+  function normalizeTransitions(value) {
+    if (!Array.isArray(value)) return [];
+    const deduped = new Map();
+    value.map(normalizeTransition).filter(Boolean).forEach((transition) => {
+      deduped.set(getPositionKey(transition.from), transition);
+    });
+    return Array.from(deduped.values());
+  }
+
+  function getRoute() {
+    return route.map((waypoint) => cloneValue(waypoint));
+  }
+
+  function getTransitions() {
+    return transitions.map((transition) => cloneValue(transition));
+  }
+
+  function persistTransitions() {
+    persistActivePreset();
+  }
+
+  function savePreset(name, options = {}) {
+    const preset = upsertPreset(name, route, transitions);
+    if (!preset) { bot.log("cave preset name is required"); return null; }
+    if (options.activate !== false) {
+      setActivePresetName(preset.name);
+      persistLegacyActivePreset();
+    }
+    bot.log("cave preset saved", { name: preset.name, waypoints: preset.route.length, transitions: preset.transitions.length });
+    return {
+      name: preset.name,
+      route: preset.route.map((waypoint) => cloneValue(waypoint)),
+      transitions: preset.transitions.map((transition) => cloneValue(transition)),
+    };
+  }
+
+  function createPreset(name) {
+    const normalizedName = normalizePresetName(name);
+    if (!normalizedName) { bot.log("cave preset name is required"); return null; }
+    if (getPresetByName(normalizedName)) { bot.log("cave preset already exists", { name: normalizedName }); return null; }
+    if (state.running) stop();
+    const preset = upsertPreset(normalizedName, [], []);
+    if (!preset) return null;
+    loadPresetState(preset.name);
+    bot.log("cave preset created", { name: preset.name });
+    return { name: preset.name, route: [], transitions: [] };
+  }
+
+  function loadPreset(name) {
+    const preset = getPresetByName(name);
+    if (!preset) { bot.log("cave preset not found", { name }); return null; }
+    if (state.running) stop();
+    loadPresetState(preset.name);
+    bot.log("cave preset loaded", { name: preset.name, waypoints: route.length, transitions: transitions.length });
+    return { name: preset.name, route: getRoute(), transitions: getTransitions() };
+  }
+
+  function deletePreset(name) {
+    const preset = getPresetByName(name);
+    if (!preset) { bot.log("cave preset not found", { name }); return false; }
+    presets = presets.filter((entry) => entry.name.toLowerCase() !== preset.name.toLowerCase());
+    persistPresets();
+    if (preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
+      const fallbackPreset = presets[0] || null;
+      if (state.running) stop();
+      if (fallbackPreset) {
+        loadPresetState(fallbackPreset.name);
+      } else {
+        route = [];
+        transitions = [];
+        state.currentIndex = 0;
+        state.direction = 1;
+        state.pendingTransitionSource = null;
+        setActivePresetName(defaultPresetName);
+        persistLegacyActivePreset();
+      }
+    }
+    bot.log("cave preset deleted", { name: preset.name });
+    return true;
+  }
+
+  function exportPresets() {
+    return {
+      version: 1,
+      activePresetName: getActivePresetName(),
+      presets: presets.map((preset) => ({
+        name: preset.name,
+        route: preset.route.map((waypoint) => cloneValue(waypoint)),
+        transitions: preset.transitions.map((transition) => cloneValue(transition)),
+      })),
+    };
+  }
+
+  function importPresets(value) {
+    let parsed = value;
+    if (typeof value === "string") {
+      try { parsed = JSON.parse(value); }
+      catch (error) { bot.log("cave preset import failed: invalid JSON", error?.message || error); return null; }
+    }
+    const payload = parsed && typeof parsed === "object" ? parsed : null;
+    const importedPresets = normalizePresets(payload?.presets || payload);
+    if (!importedPresets.length) { bot.log("cave preset import failed: no valid presets found"); return null; }
+    if (state.running) stop();
+    presets = importedPresets;
+    persistPresets();
+    const requestedActiveName = normalizePresetName(payload?.activePresetName);
+    const targetActivePreset = getPresetByName(requestedActiveName) || presets[0];
+    if (targetActivePreset) loadPresetState(targetActivePreset.name);
+    bot.log("cave presets imported", { presets: presets.length, activePresetName: getActivePresetName() });
+    return exportPresets();
+  }
+
+  function getCurrentWaypoint() {
+    if (!route.length) return null;
+    if (state.currentIndex < 0 || state.currentIndex >= route.length) state.currentIndex = 0;
+    return route[state.currentIndex] || null;
+  }
+
+  function isDelayWaypoint(waypoint) {
+    return !!waypoint && waypoint.type === "delay";
+  }
+
+  function getNearbyCreatures() {
+    const targetNames = bot.attack?.config?.targetNames;
+    const hasTargetFilter = Array.isArray(targetNames) && targetNames.length > 0;
+    if (!hasTargetFilter) return [];
+    return bot.attack?.getNearbyMonsters?.() || [];
+  }
+
+  function hasNearbyCreatures() {
+    return getNearbyCreatures().length > 0;
+  }
+
+  function shouldPauseForCreatures() {
+    return !!config.pauseUntilClear && hasNearbyCreatures();
+  }
+
+  function getAttackTargetNames() {
+    const targetNames = bot.attack?.config?.targetNames;
+    if (!Array.isArray(targetNames)) return [];
+    const deduped = new Map();
+    targetNames.forEach((name) => {
+      const normalized = String(name || "").trim();
+      if (!normalized) return;
+      deduped.set(normalized.toLowerCase(), normalized);
+    });
+    return Array.from(deduped.values());
+  }
+
+  function normalizeSpawnFloorOffset(value) {
+    if (!Number.isFinite(Number(value))) return 0;
+    return Math.trunc(Number(value));
+  }
+
+  function getSpawnWatchFloor(position = normalizePosition(bot.getPlayerPosition())) {
+    if (!position) return null;
+    return position.z - normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset);
+  }
+
+  function isTargetMonster(creature, targetNames) {
+    const name = String(creature?.name || "").trim().toLowerCase();
+    if (!name) return false;
+    return targetNames.some((targetName) => targetName.toLowerCase() === name);
+  }
+
+  function getSpawnFloorMonsters(position = normalizePosition(bot.getPlayerPosition())) {
+    const targetNames = getAttackTargetNames();
+    const targetFloor = getSpawnWatchFloor(position);
+    if (!targetNames.length || targetFloor == null) return [];
+    return (bot.xray?.getVisibleMonsters?.() || []).filter((creature) => {
+      const creatureFloor = Number(creature?.__position?.z ?? creature?.getPosition?.()?.z);
+      if (!Number.isFinite(creatureFloor) || creatureFloor !== targetFloor) return false;
+      return isTargetMonster(creature, targetNames);
+    });
+  }
+
+  function hasSpawnFloorMonster(position = normalizePosition(bot.getPlayerPosition())) {
+    return getSpawnFloorMonsters(position).length > 0;
+  }
+
+  function getSpawnWaitWaypointIndex() {
+    const index = route.findIndex((entry) => !isDelayWaypoint(entry));
+    return index >= 0 ? index : 0;
+  }
+
+  function isSpawnWaitWaypoint(waypoint, index = state.currentIndex) {
+    return index === getSpawnWaitWaypointIndex() && !!waypoint && !isDelayWaypoint(waypoint);
+  }
+
+  function shouldPauseForSpawn(position, waypoint) {
+    if (!config.pauseUntilSpawn || !getAttackTargetNames().length) return false;
+    if (!isSpawnWaitWaypoint(waypoint)) return false;
+    if (hasSpawnFloorMonster(position)) return false;
+    return isAtWaypoint(position, waypoint);
+  }
+
+  function resetDelayState() {
+    state.delayUntil = 0;
+    state.delayWaypointIndex = null;
+  }
+
+  function getPositionKey(position) {
+    return position ? `${position.x},${position.y},${position.z}` : null;
+  }
+
+  function getDistance(from, to) {
+    if (!from || !to || isDelayWaypoint(from) || isDelayWaypoint(to) || Number(from.z) !== Number(to.z)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Math.abs(Number(from.x) - Number(to.x)) + Math.abs(Number(from.y) - Number(to.y));
+  }
+
+  function isBesideOrSameTile(from, to) {
+    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
+    return Math.abs(Number(from.x) - Number(to.x)) <= 1 && Math.abs(Number(from.y) - Number(to.y)) <= 1;
+  }
+
+  function isAdjacentTile(from, to) {
+    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
+    const dx = Math.abs(Number(from.x) - Number(to.x));
+    const dy = Math.abs(Number(from.y) - Number(to.y));
+    return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
+  }
+
+  function getDistanceToWaypoint(position, waypoint) {
+    if (!position || !waypoint || isDelayWaypoint(waypoint)) return null;
+    return getDistance(position, waypoint);
+  }
+
+  function isSameTile(a, b) {
+    if (!a || !b) return false;
+    return Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y) && Number(a.z) === Number(b.z);
+  }
+
+  function getWaypointLookahead() {
+    const value = Number(config.waypointLookahead);
+    if (!Number.isFinite(value) || value < 1) return 12;
+    return Math.trunc(value);
+  }
+
+  function findClosestWaypointIndex(position) {
+    if (!position || !route.length) return 0;
+    const tolerance = getWaypointTolerance();
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    route.forEach((waypoint, index) => {
+      if (isDelayWaypoint(waypoint)) return;
+      const distance = getDistanceToWaypoint(position, waypoint);
+      if (!Number.isFinite(distance)) return;
+      if (distance < bestDistance) { bestDistance = distance; bestIndex = index; return; }
+      if (distance <= bestDistance + tolerance && index < bestIndex) { bestIndex = index; bestDistance = distance; }
+    });
+    if (Number.isFinite(bestDistance)) return bestIndex;
+    const firstPositionIndex = route.findIndex((waypoint) => !isDelayWaypoint(waypoint));
+    return firstPositionIndex >= 0 ? firstPositionIndex : 0;
+  }
+
+  function findAheadWaypointIndex(position, fromIndex, direction) {
+    const startIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(fromIndex) || 0)));
+    const lookahead = getWaypointLookahead();
+    let bestIndex = startIndex;
+    let bestDistance = getDistanceToWaypoint(position, route[startIndex]);
+    // Loop circular — sempre avança para frente
+    const limit = Math.min(route.length - 1, startIndex + lookahead);
+    for (let index = startIndex + 1; index <= limit; index += 1) {
+      if (isDelayWaypoint(route[index])) continue;
+      const distance = getDistanceToWaypoint(position, route[index]);
+      if (!Number.isFinite(distance)) continue;
+      if (!Number.isFinite(bestDistance) || distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+    }
+    return bestIndex;
+  }
+
+  function getTileAt(position) {
+    if (!position) return null;
+    return window.gameClient?.world?.getTileFromWorldPosition?.(
+      new Position(position.x, position.y, position.z)
+    ) || null;
+  }
+
+  function getTilePosition(tile) {
+    return normalizePosition(tile?.__position);
+  }
+
+  function getThingDefinition(itemId) {
+    if (!itemId) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[itemId] ||
+      window.gameClient?.itemDefinitionsBySid?.[itemId] ||
+      window.gameClient?.itemDefinitions?.[itemId] ||
+      null
+    );
+  }
+
+  function getThingName(thing) {
+    const definition = getThingDefinition(thing?.id);
+    return String(definition?.properties?.name || thing?.name || "").trim().toLowerCase();
+  }
+
+  function isLadderThing(thing) {
+    if (!thing?.id) return false;
+    if (ladderItemIds.has(Number(thing.id))) return true;
+    return getThingName(thing).includes("ladder");
+  }
+
+  function isFloorChangeThing(thing) {
+    const definition = getThingDefinition(thing?.id);
+    return !!definition?.properties?.floorchange || isLadderThing(thing);
+  }
+
+  function isFloorChangeTile(tile) {
+    const tilePosition = getTilePosition(tile);
+    if (!tilePosition) return false;
+    if (isFloorChangeThing(tile)) return true;
+    return Array.isArray(tile.items) && tile.items.some((item) => isFloorChangeThing(item));
+  }
+
+  function getTileThings(tile) {
+    if (!tile) return [];
+    const things = [];
+    if (tile.id) things.push(tile);
+    if (Array.isArray(tile.items)) tile.items.forEach((item) => { if (item) things.push(item); });
+    return things;
+  }
+
+  function tileHasNamedThing(tile, needle) {
+    const value = String(needle || "").trim().toLowerCase();
+    if (!value) return false;
+    return getTileThings(tile).some((thing) => getThingName(thing).includes(value));
+  }
+
+  function isLadderTile(tile) { return getTileThings(tile).some((thing) => isLadderThing(thing)); }
+  function isStairsTile(tile) { return tileHasNamedThing(tile, "stairs"); }
+  function isHoleTile(tile) { return tileHasNamedThing(tile, "hole"); }
+  function isRopeSpotTile(tile) { return tileHasNamedThing(tile, "rope spot"); }
+  function isRopeTargetTile(tile) { return isHoleTile(tile) || isRopeSpotTile(tile); }
+
+  function isShovelTargetThing(thing) {
+    const name = getThingName(thing);
+    if (!name) return false;
+    return shovelTargetNamePatterns.some((pattern) => pattern.test(name));
+  }
+
+  function isShovelTargetTile(tile) {
+    return getTileThings(tile).some((thing) => isShovelTargetThing(thing));
+  }
+
+  function isTransitionCandidateTile(tile, waypoint, position) {
+    if (!tile) return false;
+    if (isFloorChangeTile(tile)) return true;
+    const hasWaypointDelta = waypoint && position && Number.isFinite(waypoint.z) && Number.isFinite(position.z);
+    if (!hasWaypointDelta) return false;
+    if (waypoint.z > position.z) return isShovelTargetTile(tile);
+    if (waypoint.z < position.z) return isRopeTargetTile(tile);
+    return false;
+  }
+
+  function getFloorChangeTileBias(tile, position, waypoint) {
+    if (!tile || !position || !waypoint || position.z === waypoint.z) return 0;
+    const goingDown = waypoint.z > position.z;
+    const goingUp = waypoint.z < position.z;
+    if (goingDown) {
+      if (isLadderTile(tile)) return -30;
+      if (isHoleTile(tile)) return -20;
+      if (isStairsTile(tile)) return 25;
+    }
+    if (goingUp) {
+      if (isStairsTile(tile)) return -20;
+      if (isHoleTile(tile)) return 20;
+    }
+    return 0;
+  }
+
+  function getLoadedTiles() {
+    const chunks = window.gameClient?.world?.chunks || [];
+    const tiles = [];
+    for (const chunk of chunks) {
+      if (!chunk?.tiles) continue;
+      for (const tile of chunk.tiles) {
+        if (tile?.__position) tiles.push(tile);
+      }
+    }
+    return tiles;
+  }
+
+  function ensureMinimapOverlayStyle() {
+    if (document.getElementById(minimapOverlayStyleId)) return;
+    const style = document.createElement("style");
+    style.id = minimapOverlayStyleId;
+    style.textContent = `
+      #${minimapOverlayRootId} { position: fixed; inset: 0; pointer-events: none; z-index: 999997; }
+      #${minimapOverlayRootId} canvas { position: fixed; pointer-events: none; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function ensureMinimapOverlayRoot() {
+    let root = document.getElementById(minimapOverlayRootId);
+    if (root) return root;
+    root = document.createElement("div");
+    root.id = minimapOverlayRootId;
+    root.innerHTML = '<canvas></canvas>';
+    document.body.appendChild(root);
+    return root;
+  }
+
+  function destroyMinimapOverlayElements() {
+    document.getElementById(minimapOverlayRootId)?.remove();
+    document.getElementById(minimapOverlayStyleId)?.remove();
+  }
+
+  function getMinimapCanvas() {
+    return window.gameClient?.renderer?.minimap?.minimap?.canvas || document.getElementById("minimap") || null;
+  }
+
+  function getMinimapViewport() {
+    const canvas = getMinimapCanvas();
+    if (!(canvas instanceof HTMLCanvasElement)) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return { canvas, rect };
+  }
+
+  function getWaypointCanvasPoint(waypoint, viewport, playerPosition, minimap) {
+    if (!waypoint || !viewport || !playerPosition || !minimap) return null;
+    if (isDelayWaypoint(waypoint)) return null;
+    if (waypoint.z !== minimap.__renderLayer) return null;
+    const zoomScale = 1 << (Number(minimap.__zoomLevel) || 0);
+    const center = minimap.center || { x: 0, y: 0 };
+    const internalWidth = Number(viewport.canvas.width) || 160;
+    const internalHeight = Number(viewport.canvas.height) || 160;
+    const internalX = (internalWidth / 2) + (waypoint.x - playerPosition.x - Number(center.x || 0)) * zoomScale;
+    const internalY = (internalHeight / 2) + (waypoint.y - playerPosition.y - Number(center.y || 0)) * zoomScale;
+    return {
+      x: internalX * (viewport.rect.width / internalWidth),
+      y: internalY * (viewport.rect.height / internalHeight),
+    };
+  }
+
+  function renderMinimapOverlay() {
+    const viewport = getMinimapViewport();
+    const minimap = window.gameClient?.renderer?.minimap;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const root = ensureMinimapOverlayRoot();
+    const canvas = root.querySelector("canvas");
+    if (!(canvas instanceof HTMLCanvasElement)) return;
+    if (!viewport || !minimap || !playerPosition || !route.length) {
+      canvas.width = 0; canvas.height = 0; return;
+    }
+    const rect = viewport.rect;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
+    const pixelWidth = Math.round(width * dpr);
+    const pixelHeight = Math.round(height * dpr);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth; canvas.height = pixelHeight;
+    }
+    canvas.style.left = `${Math.round(rect.left)}px`;
+    canvas.style.top = `${Math.round(rect.top)}px`;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const visibleWaypoints = route
+      .map((waypoint, index) => ({ waypoint, index, point: getWaypointCanvasPoint(waypoint, viewport, playerPosition, minimap) }))
+      .filter((entry) => entry.point);
+    if (!visibleWaypoints.length) return;
+    context.save();
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    for (let index = 1; index < visibleWaypoints.length; index += 1) {
+      const previous = visibleWaypoints[index - 1];
+      const current = visibleWaypoints[index];
+      if (current.index !== previous.index + 1) continue;
+      context.strokeStyle = "rgba(92, 228, 196, 0.7)";
+      context.lineWidth = 2;
+      context.beginPath();
+      context.moveTo(previous.point.x, previous.point.y);
+      context.lineTo(current.point.x, current.point.y);
+      context.stroke();
+    }
+    visibleWaypoints.forEach(({ point, index }) => {
+      const isCurrent = state.running && index === state.currentIndex;
+      const radius = isCurrent ? 7 : 5;
+      context.fillStyle = isCurrent ? "#ffcf5a" : "#2bd1c4";
+      context.strokeStyle = isCurrent ? "#6a2400" : "#083f49";
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+      context.fillStyle = "#ffffff";
+      context.font = "bold 11px Verdana, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(String(index + 1), point.x, point.y);
+    });
+    context.restore();
+  }
+
+  function startMinimapOverlay() {
+    if (minimapOverlayState.timerId != null) return;
+    ensureMinimapOverlayStyle();
+    renderMinimapOverlay();
+    minimapOverlayState.timerId = window.setInterval(renderMinimapOverlay, 250);
+  }
+
+  function stopMinimapOverlay() {
+    if (minimapOverlayState.timerId != null) {
+      window.clearInterval(minimapOverlayState.timerId);
+      minimapOverlayState.timerId = null;
+    }
+    destroyMinimapOverlayElements();
+  }
+
+  function getNearbyTransitionTiles(position, waypoint, radius = 8) {
+    if (!position) return [];
+    return getLoadedTiles()
+      .map((tile) => ({ tile, position: getTilePosition(tile) }))
+      .filter((entry) =>
+        entry.position &&
+        entry.position.z === position.z &&
+        Math.abs(entry.position.x - position.x) <= radius &&
+        Math.abs(entry.position.y - position.y) <= radius &&
+        isTransitionCandidateTile(entry.tile, waypoint, position)
+      );
+  }
+
+  function findTransitionTileNearPosition(position, waypoint, radius = 1) {
+    if (!position) return null;
+    let best = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
+      const distance = getDistance(position, entry.position);
+      if (!Number.isFinite(distance)) return;
+      if (distance < bestDistance) { bestDistance = distance; best = entry; }
+    });
+    return best;
+  }
+
+  function findBestKnownTransition(position, waypoint) {
+    if (!position || !waypoint) return null;
+    let best = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    transitions.forEach((transition) => {
+      if (transition.from.z !== position.z || transition.to.z !== waypoint.z) return;
+      const playerDistance = getDistance(position, transition.from);
+      const landingDistance = getDistance(transition.to, waypoint);
+      if (!Number.isFinite(playerDistance) || !Number.isFinite(landingDistance)) return;
+      const score = playerDistance * 10 + landingDistance;
+      if (score < bestScore) { bestScore = score; best = transition; }
+    });
+    return best;
+  }
+
+  function findNearbyTransitionTile(position, waypoint) {
+    if (!position || !waypoint) return null;
+    const waypointDistance = Math.abs(position.x - waypoint.x) + Math.abs(position.y - waypoint.y);
+    const radius = Math.max(4, Math.min(20, waypointDistance + 2));
+    let best = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
+      const playerDistance = getDistance(position, entry.position);
+      const tileToWaypointDistance = Math.abs(entry.position.x - waypoint.x) + Math.abs(entry.position.y - waypoint.y);
+      const score = playerDistance * 10 + tileToWaypointDistance + getFloorChangeTileBias(entry.tile, position, waypoint);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { tile: entry.tile, position: entry.position, playerDistance, waypointDistance: tileToWaypointDistance };
+      }
+    });
+    return best;
+  }
+
+  function getWaypointTolerance() {
+    const value = Number(config.waypointTolerance);
+    if (!Number.isFinite(value) || value < 0) return 2;
+    return Math.trunc(value);
+  }
+
+  function findNextPositionIndex(startIndex, direction = 1) {
+    let index = Math.trunc(Number(startIndex) || 0);
+    while (index >= 0 && index < route.length) {
+      if (!isDelayWaypoint(route[index])) return index;
+      index += direction;
+    }
+    return Math.max(0, Math.min(route.length - 1, Math.trunc(Number(startIndex) || 0)));
+  }
+
+  function syncWaypointProgress(position) {
+    if (!position || !route.length) return false;
+    const previousIndex = state.currentIndex;
+    const direction = 1; // sempre para frente (loop circular)
+
+    if (config.strictOrder) {
+      // ── Modo ordem estrita: avança um por um, sem pulos ──────
+      const waypoint = getCurrentWaypoint();
+      if (!isDelayWaypoint(waypoint) && isAtWaypoint(position, waypoint)) {
+        const nextIndex = state.currentIndex + 1;
+        state.currentIndex = nextIndex >= route.length ? 0 : nextIndex;
+        resetDelayState();
+      }
+    } else {
+      // ── Modo lookahead: comportamento original ────────────────
+      let index = state.currentIndex;
+      while (index < route.length) {
+        const waypoint = route[index];
+        if (isDelayWaypoint(waypoint) || !isAtWaypoint(position, waypoint)) break;
+        index += 1;
+      }
+      if (index !== state.currentIndex) {
+        state.currentIndex = index >= route.length ? 0 : index;
+      }
+      const currentWaypoint = getCurrentWaypoint();
+      const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
+      const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
+      if (Number.isFinite(currentDistance) && aheadIndex > state.currentIndex) {
+        const aheadWaypoint = route[aheadIndex];
+        const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
+        if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
+          let nextIndex = findNextPositionIndex(aheadIndex, 1);
+          if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
+            const afterAhead = aheadIndex + 1;
+            if (afterAhead < route.length) nextIndex = findNextPositionIndex(afterAhead, 1);
+          } else {
+            const afterIndex = aheadIndex + 1;
+            if (afterIndex < route.length) {
+              const afterWaypoint = route[afterIndex];
+              const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
+              if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, 1);
+            }
+          }
+          if (nextIndex > state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
+        }
+      }
+    }
+
+    if (previousIndex !== state.currentIndex) {
+      bot.log("cave synced waypoint", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, strictOrder: config.strictOrder });
+      return true;
+    }
+    return false;
+  }
+
+  function isAtWaypoint(position, waypoint) {
+    const distance = getDistanceToWaypoint(position, waypoint);
+    if (!Number.isFinite(distance)) return false;
+    return distance <= getWaypointTolerance();
+  }
+
+  function goToWaypoint(waypoint) {
+    const from = bot.getPlayerPosition();
+    if (!from || !waypoint || isDelayWaypoint(waypoint)) return false;
+    const to = new Position(waypoint.x, waypoint.y, waypoint.z);
+    try {
+      window.gameClient?.world?.pathfinder?.findPath?.(from, to);
+      state.lastPathAt = Date.now();
+      bot.log("cave pathing to waypoint", { ...waypoint, index: state.currentIndex + 1, total: route.length });
+      return true;
+    } catch (error) {
+      bot.log("cave pathing failed", { ...waypoint, error: error?.message || error });
+      return false;
+    }
+  }
+
+  function goToPosition(position) {
+    if (!position) return false;
+    return goToWaypoint(position);
+  }
+
+  function markPendingTransitionSource(source) {
+    const normalized = normalizePosition(source);
+    if (!normalized) return;
+    state.pendingTransitionSource = { ...normalized, at: Date.now() };
+  }
+
+  function upsertTransition(from, to) {
+    const normalizedFrom = normalizePosition(from);
+    const normalizedTo = normalizePosition(to);
+    if (!normalizedFrom || !normalizedTo || normalizedFrom.z === normalizedTo.z) return null;
+    const key = getPositionKey(normalizedFrom);
+    const index = transitions.findIndex((transition) => getPositionKey(transition.from) === key);
+    const next = {
+      from: normalizedFrom,
+      to: normalizedTo,
+      count: index >= 0 ? transitions[index].count + 1 : 1,
+      lastSeenAt: Date.now(),
+    };
+    if (index >= 0) { transitions[index] = next; } else { transitions.push(next); }
+    persistTransitions();
+    bot.log("cave learned floor transition", next);
+    return cloneValue(next);
+  }
+
+  function resolveObservedTransitionSource(previousPosition) {
+    const pending = normalizePosition(state.pendingTransitionSource);
+    if (pending && pending.z === previousPosition.z) return pending;
+    const currentTile = getTileAt(previousPosition);
+    if (currentTile && isFloorChangeTile(currentTile)) return previousPosition;
+    const nearby = findTransitionTileNearPosition(previousPosition, null, 1);
+    if (nearby?.position) return nearby.position;
+    return null;
+  }
+
+  function observePosition() {
+    const current = normalizePosition(bot.getPlayerPosition());
+    if (!current) return;
+    const previous = state.lastObservedPosition;
+    if (previous && !isSameTile(previous, current) && previous.z !== current.z) {
+      const source = resolveObservedTransitionSource(previous);
+      if (source) upsertTransition(source, current);
+      state.pendingTransitionSource = null;
+    }
+    state.lastObservedPosition = current;
+  }
+
+  function getEquipment() { return window.gameClient?.player?.equipment || null; }
+  function getOpenContainers() { return Array.from(window.gameClient?.player?.__openedContainers || []); }
+
+  function findAdjacentWalkablePosition(targetPosition, playerPosition) {
+    if (!targetPosition || !playerPosition) return null;
+    const offsets = [
+      { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
+      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
+    ];
+    offsets.sort((a, b) => {
+      const da = Math.abs(targetPosition.x + a.x - playerPosition.x) + Math.abs(targetPosition.y + a.y - playerPosition.y);
+      const db = Math.abs(targetPosition.x + b.x - playerPosition.x) + Math.abs(targetPosition.y + b.y - playerPosition.y);
+      return da - db;
+    });
+    for (const offset of offsets) {
+      const position = new Position(targetPosition.x + offset.x, targetPosition.y + offset.y, targetPosition.z);
+      const tile = window.gameClient?.world?.getTileFromWorldPosition?.(position);
+      if (tile?.isWalkable?.()) return normalizePosition(position);
+    }
+    return null;
+  }
+
+  function isRopeItem(item) { const name = getThingName(item); return !!name && ropeNamePattern.test(name); }
+  function isShovelItem(item) { const name = getThingName(item); return !!name && shovelNamePattern.test(name); }
+
+  function findToolSource(predicate) {
+    const equipment = getEquipment();
+    if (equipment?.slots) {
+      for (let slotIndex = 0; slotIndex < equipment.slots.length; slotIndex += 1) {
+        const item = equipment.getSlotItem?.(slotIndex);
+        if (predicate(item)) return { which: equipment, index: slotIndex, item, location: "equipment" };
+      }
+    }
+    for (const container of getOpenContainers()) {
+      const slots = container?.slots || [];
+      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+        const item = container.getSlotItem?.(slotIndex);
+        if (predicate(item)) return { which: container, index: slotIndex, item, location: "container" };
+      }
+    }
+    return null;
+  }
+
+  function findRopeSource() { return findToolSource(isRopeItem); }
+  function findShovelSource() { return findToolSource(isShovelItem); }
+
+  function useToolOnTile(tool, targetTile, targetPosition, actionLabel, now = Date.now()) {
+    if (!tool || !targetTile || !targetPosition) return false;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    if (!playerPosition) return false;
+    if (!isAdjacentTile(playerPosition, targetPosition)) {
+      const adjacentPosition = findAdjacentWalkablePosition(targetPosition, playerPosition);
+      if (adjacentPosition) return goToPosition(adjacentPosition);
+    }
+    window.gameClient?.mouse?.__handleItemUseWith?.(
+      { which: tool.which, index: tool.index },
+      { which: targetTile, index: 0xFF }
+    );
+    state.lastStairsUseAt = now;
+    state.lastPathAt = now;
+    markPendingTransitionSource(targetPosition);
+    bot.log(actionLabel, { source: targetPosition, toolLocation: tool.location, toolSlot: tool.index, toolName: getThingName(tool.item) });
+    return true;
+  }
+
+  function useRopeOnTile(targetTile, targetPosition, now = Date.now()) {
+    return useToolOnTile(findRopeSource(), targetTile, targetPosition, "cave roped transition tile", now);
+  }
+
+  function useShovelOnTile(targetTile, targetPosition, now = Date.now()) {
+    return useToolOnTile(findShovelSource(), targetTile, targetPosition, "cave shoveled transition tile", now);
+  }
+
+  function useFloorChangeTile(target, waypoint, now = Date.now()) {
+    const position = normalizePosition(bot.getPlayerPosition());
+    const targetPosition = normalizePosition(target?.position);
+    const targetTile = target?.tile || (targetPosition ? getTileAt(targetPosition) : null);
+    if (!position || !targetPosition || !targetTile) return false;
+    if (now - state.lastStairsUseAt < 1200) return true;
+    if (waypoint?.z < position.z && isRopeTargetTile(targetTile)) return useRopeOnTile(targetTile, targetPosition, now);
+    if (!isFloorChangeTile(targetTile)) {
+      if (waypoint?.z > position.z && isShovelTargetTile(targetTile)) return useShovelOnTile(targetTile, targetPosition, now);
+      return false;
+    }
+    if (isLadderTile(targetTile)) {
+      window.gameClient?.mouse?.use?.({ which: targetTile, index: 0xFF });
+      state.lastStairsUseAt = now;
+      state.lastPathAt = now;
+      markPendingTransitionSource(targetPosition);
+      bot.log("cave used ladder tile", { source: targetPosition, targetZ: waypoint?.z ?? null });
+      return true;
+    }
+    if (!isSameTile(position, targetPosition)) return goToPosition(targetPosition);
+    const currentTile = getTileAt(position);
+    if (!currentTile || !isFloorChangeTile(currentTile)) return false;
+    window.gameClient?.mouse?.use?.({ which: currentTile, index: 0xFF });
+    state.lastStairsUseAt = now;
+    state.lastPathAt = now;
+    markPendingTransitionSource(position);
+    bot.log("cave used floor-change tile", { source: position, targetZ: waypoint?.z ?? null });
+    return true;
+  }
+
+  function handleFloorChange(waypoint, now = Date.now()) {
+    const position = normalizePosition(bot.getPlayerPosition());
+    if (!position || !waypoint || position.z === waypoint.z) return false;
+    const visibleCandidate = findNearbyTransitionTile(position, waypoint);
+    if (visibleCandidate) {
+      const moved = useFloorChangeTile(visibleCandidate, waypoint, now);
+      if (moved) {
+        bot.log("cave probing visible floor-change tile", { tileX: visibleCandidate.position.x, tileY: visibleCandidate.position.y, tileZ: visibleCandidate.position.z, targetZ: waypoint.z });
+        return true;
+      }
+    }
+    const knownTransition = findBestKnownTransition(position, waypoint);
+    if (knownTransition) {
+      const target = { tile: getTileAt(knownTransition.from), position: knownTransition.from };
+      const moved = useFloorChangeTile(target, waypoint, now);
+      if (moved) {
+        bot.log("cave using learned floor transition", { from: knownTransition.from, to: knownTransition.to, waypoint });
+        return true;
+      }
+      bot.log("cave learned transition unavailable, falling back to live scan", { from: knownTransition.from, to: knownTransition.to, waypoint });
+    }
+    return false;
+  }
+
+  function advanceWaypoint() {
+    if (!route.length) return null;
+    if (route.length === 1) return route[0];
+    // Loop circular: quando chega no último volta para o primeiro
+    let nextIndex = state.currentIndex + 1;
+    if (nextIndex >= route.length) { nextIndex = 0; }
+    state.currentIndex = nextIndex;
+    state.direction = 1; // sempre para frente
+    const nextWaypoint = getCurrentWaypoint();
+    resetDelayState();
+    bot.log("cave advanced waypoint", { index: state.currentIndex + 1, total: route.length, waypoint: nextWaypoint });
+    return nextWaypoint;
+  }
+
+  function scheduleNextTick() {
+    if (!state.running) return;
+    state.timerId = window.setTimeout(tick, config.tickMs);
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try {
+      observePosition();
+      if (!route.length) { stop(); return; }
+      const position = normalizePosition(bot.getPlayerPosition());
+      const positionKey = getPositionKey(position);
+      const now = Date.now();
+      const attackStatus = bot.attack?.status?.() || null;
+      const shouldPauseForCombat = !!attackStatus?.combatActive && Number(attackStatus?.combatDurationMs || 0) < 60000;
+      if (shouldPauseForCombat) {
+        if (!state.pausedForCombat) { state.pausedForCombat = true; bot.log("cave paused for auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
+        return;
+      }
+      if (state.pausedForCombat) { state.pausedForCombat = false; bot.log("cave resumed after auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
+      if (shouldPauseForCreatures()) {
+        if (!state.pausedForCreatures) { state.pausedForCreatures = true; const nearby = getNearbyCreatures(); bot.log("cave paused until area clear", { creatureCount: nearby.length, creatures: nearby.map((c) => c.name || "Mob") }); }
+        return;
+      }
+      if (state.pausedForCreatures) { state.pausedForCreatures = false; bot.log("cave resumed after area clear"); }
+      let waypoint = getCurrentWaypoint();
+      if (!waypoint) { stop(); return; }
+      if (shouldPauseForSpawn(position, waypoint)) {
+        if (!state.pausedForSpawn) { state.pausedForSpawn = true; bot.log("cave paused until target monster spawns", { floorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset), watchFloor: getSpawnWatchFloor(position), targetNames: getAttackTargetNames() }); }
+        return;
+      }
+      if (state.pausedForSpawn) {
+        state.pausedForSpawn = false;
+        if (hasSpawnFloorMonster(position)) { const spawned = getSpawnFloorMonsters(position); bot.log("cave resumed after target monster spawned", { floorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset), watchFloor: getSpawnWatchFloor(position), creatures: spawned.map((c) => c.name || "Mob") }); }
+      }
+      syncWaypointProgress(position);
+      waypoint = getCurrentWaypoint();
+      if (!waypoint) { stop(); return; }
+      if (positionKey && positionKey !== state.lastPositionKey) { state.lastPositionKey = positionKey; state.lastProgressAt = now; }
+      if (isDelayWaypoint(waypoint)) {
+        if (state.delayWaypointIndex !== state.currentIndex || !state.delayUntil) {
+          state.delayWaypointIndex = state.currentIndex;
+          state.delayUntil = now + (Math.max(1, Number(waypoint.seconds) || 1) * 1000);
+          bot.log("cave delay started", { index: state.currentIndex + 1, total: route.length, seconds: Math.max(1, Number(waypoint.seconds) || 1) });
+        }
+        if (now < state.delayUntil) return;
+        bot.log("cave delay completed", { index: state.currentIndex + 1, total: route.length });
+        waypoint = advanceWaypoint();
+        if (!waypoint) return;
+      }
+      if (isAtWaypoint(position, waypoint) && !isDelayWaypoint(waypoint)) { waypoint = advanceWaypoint(); }
+      if (!waypoint) return;
+      if (position && waypoint.z !== position.z) { handleFloorChange(waypoint, now); return; }
+
+      // ── VELOCIDADE: repath mais agressivo ──────────────────
+      const shouldRepath =
+        now - state.lastPathAt >= config.repathMs ||
+        !state.lastProgressAt ||
+        now - state.lastProgressAt >= config.repathMs;
+
+      if (shouldRepath) goToWaypoint(waypoint);
+
+    } catch (error) {
+      bot.log("cave tick failed", error?.message || error);
+    } finally {
+      scheduleNextTick();
+    }
+  }
+
+  function startObserver() {
+    if (state.observerTimerId != null) return;
+    // ── VELOCIDADE: observer a cada 50ms (era 200ms) ────────
+    state.observerTimerId = window.setInterval(() => {
+      try { observePosition(); }
+      catch (error) { bot.log("cave observer failed", error?.message || error); }
+    }, config.observerMs);
+  }
+
+  function stopObserver() {
+    if (state.observerTimerId == null) return;
+    window.clearInterval(state.observerTimerId);
+    state.observerTimerId = null;
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    // ── NÃO forçamos tickMs=500 aqui ────────────────────────
+    persistConfig();
+    if (!route.length) { bot.log("cave bot cannot start without waypoints"); return false; }
+    const hasPositionWaypoint = route.some((waypoint) => !isDelayWaypoint(waypoint));
+    if (!hasPositionWaypoint) { bot.log("cave bot cannot start without position waypoints"); return false; }
+    if (state.running) { bot.log("cave bot already running"); return false; }
+    const position = normalizePosition(bot.getPlayerPosition());
+    state.running = true;
+    state.currentIndex = findClosestWaypointIndex(position);
+    state.direction = 1; // sempre loop circular para frente
+    state.lastPathAt = 0;
+    state.lastPositionKey = getPositionKey(position);
+    state.lastProgressAt = Date.now();
+    state.pausedForCombat = false;
+    state.pausedForCreatures = false;
+    state.pausedForSpawn = false;
+    resetDelayState();
+    bot.log("cave bot started", { waypoints: route.length, currentIndex: state.currentIndex + 1, direction: state.direction, waypoint: getCurrentWaypoint(), tickMs: config.tickMs, repathMs: config.repathMs, observerMs: config.observerMs });
+    tick();
+    return true;
+  }
+
+  function stop(options = {}) {
+    const shouldPersistEnabled = options.persistEnabled !== false;
+    state.running = false;
+    if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
+    if (shouldPersistEnabled) { config.enabled = false; persistConfig(); }
+    state.pausedForCombat = false;
+    state.pausedForCreatures = false;
+    state.pausedForSpawn = false;
+    resetDelayState();
+    bot.log("cave bot stopped");
+    return true;
+  }
+
+  function addWaypoint(waypoint) {
+    const normalized = normalizeWaypoint(waypoint);
+    if (!normalized) return null;
+    route.push(normalized);
+    persistRoute();
+    bot.log("cave waypoint added", { ...normalized, total: route.length });
+    return cloneValue(normalized);
+  }
+
+  function addWaypointCurrentSpot() {
+    const position = normalizePosition(bot.getPlayerPosition());
+    if (!position) { bot.log("could not read current position for cave waypoint"); return null; }
+    return addWaypoint(position);
+  }
+
+  function addDelay(seconds) {
+    const normalizedSeconds = Math.max(1, Math.trunc(Number(seconds) || 0));
+    if (!Number.isFinite(normalizedSeconds) || normalizedSeconds <= 0) { bot.log("invalid cave delay", { seconds }); return null; }
+    const delayWaypoint = { type: "delay", seconds: normalizedSeconds };
+    route.push(delayWaypoint);
+    persistRoute();
+    bot.log("cave delay added", { ...delayWaypoint, total: route.length });
+    return cloneValue(delayWaypoint);
+  }
+
+  function clearWaypoints() {
+    route = [];
+    state.currentIndex = 0;
+    state.direction = 1;
+    resetDelayState();
+    persistRoute();
+    bot.log("cave route cleared");
+    if (state.running) stop();
+    return [];
+  }
+
+  function clearTransitions() {
+    transitions = [];
+    state.pendingTransitionSource = null;
+    persistTransitions();
+    bot.log("cave learned transitions cleared");
+    return [];
+  }
+
+  function removeLastWaypoint() {
+    if (!route.length) return null;
+    const removed = route.pop();
+    if (state.currentIndex >= route.length) { state.currentIndex = Math.max(0, route.length - 1); resetDelayState(); }
+    if (route.length <= 1) state.direction = 1;
+    persistRoute();
+    bot.log("cave waypoint removed", removed);
+    if (!route.length && state.running) stop();
+    return removed;
+  }
+
+  function setCurrentIndex(index) {
+    if (!route.length) { state.currentIndex = 0; state.direction = 1; return 0; }
+    const nextIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(index) || 0)));
+    state.currentIndex = nextIndex;
+    resetDelayState();
+    state.direction = 1; // sempre loop circular
+    return state.currentIndex;
+  }
+
+  function status() {
+    const position = normalizePosition(bot.getPlayerPosition());
+    const waypoint = getCurrentWaypoint();
+    return {
+      running: state.running,
+      config: { ...config },
+      route: getRoute(),
+      transitions: getTransitions(),
+      presetNames: getPresetNames(),
+      activePresetName: getActivePresetName(),
+      currentIndex: state.currentIndex,
+      direction: state.direction,
+      currentWaypoint: cloneValue(waypoint),
+      distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
+      lastPathAt: state.lastPathAt,
+      lastProgressAt: state.lastProgressAt,
+      pendingTransitionSource: cloneValue(state.pendingTransitionSource),
+      pausedForCombat: state.pausedForCombat,
+      pausedForCreatures: state.pausedForCreatures,
+      pausedForSpawn: state.pausedForSpawn,
+      nearbyCreatureCount: getNearbyCreatures().length,
+      spawnFloorCreatureCount: getSpawnFloorMonsters(position).length,
+      spawnWatchFloor: getSpawnWatchFloor(position),
+      spawnFloorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset),
+    };
+  }
+
+  function updateConfig(nextConfig = {}) {
+    if ("pauseUntilSpawnFloorOffset" in nextConfig) nextConfig.pauseUntilSpawnFloorOffset = normalizeSpawnFloorOffset(nextConfig.pauseUntilSpawnFloorOffset);
+    if ("waypointTolerance" in nextConfig) nextConfig.waypointTolerance = Math.max(0, Math.trunc(Number(nextConfig.waypointTolerance) || 0));
+    if ("waypointLookahead" in nextConfig) nextConfig.waypointLookahead = Math.max(1, Math.trunc(Number(nextConfig.waypointLookahead) || 12));
+    // ── VELOCIDADE: valida tickMs e repathMs sem forçar 500 ─
+    if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
+    if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
+    if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
+    Object.assign(config, nextConfig);
+    persistConfig();
+    bot.log("cave config updated", { ...config });
+    return { ...config };
+  }
+
+  // ── HOTKEY ─────────────────────────────────────────────────
+  const hotkeyConfigKey = "minibiaBot.caveHotkey.config";
+  const hotkeyConfig = Object.assign(
+    { stopKey: "Delete", startKey: "Insert", enabled: true },
+    bot.storage.get(hotkeyConfigKey, {})
+  );
+
+  function persistHotkeyConfig() { bot.storage.set(hotkeyConfigKey, { ...hotkeyConfig }); }
+
+  function showHotkeyToast(text) {
+    const existing = document.getElementById("minibia-cave-hotkey-toast");
+    if (existing) existing.remove();
+    const toast = document.createElement("div");
+    toast.id = "minibia-cave-hotkey-toast";
+    toast.textContent = text;
+    Object.assign(toast.style, {
+      position: "fixed", bottom: "80px", left: "50%", transform: "translateX(-50%)",
+      background: "rgba(0,0,0,0.82)", color: "#fff", padding: "8px 18px",
+      borderRadius: "8px", fontSize: "14px", fontFamily: "monospace",
+      zIndex: "999999", pointerEvents: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+      transition: "opacity 0.3s",
+    });
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = "0"; }, 1800);
+    setTimeout(() => { toast.remove(); }, 2200);
+  }
+
+  function onCaveHotkey(e) {
+    if (!hotkeyConfig.enabled) return;
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+    if (e.key === hotkeyConfig.stopKey) {
+      e.preventDefault();
+      if (state.running) {
+        stop();
+        bot.log("cavebot parado pela hotkey " + hotkeyConfig.stopKey);
+        showHotkeyToast("🛑 CaveBot parado (" + hotkeyConfig.stopKey + ")");
+      }
+      return;
+    }
+
+    if (e.key === hotkeyConfig.startKey) {
+      e.preventDefault();
+      if (!state.running) {
+        const started = start();
+        if (started) {
+          bot.log("cavebot iniciado pela hotkey " + hotkeyConfig.startKey);
+          showHotkeyToast("▶️ CaveBot iniciado (" + hotkeyConfig.startKey + ")");
+        } else {
+          showHotkeyToast("⚠️ CaveBot sem waypoints");
+        }
+      }
+      return;
+    }
+  }
+
+  function installHotkey() {
+    if (window.__caveHotkeyListener) {
+      document.removeEventListener("keydown", window.__caveHotkeyListener, true);
+    }
+    window.__caveHotkeyListener = onCaveHotkey;
+    document.addEventListener("keydown", onCaveHotkey, true);
+    bot.log("cave hotkey instalado — stop:" + hotkeyConfig.stopKey + " | start:" + hotkeyConfig.startKey);
+  }
+
+  function uninstallHotkey() {
+    if (window.__caveHotkeyListener) {
+      document.removeEventListener("keydown", window.__caveHotkeyListener, true);
+      window.__caveHotkeyListener = null;
+    }
+  }
+
+  function updateHotkeyConfig(next = {}) {
+    Object.assign(hotkeyConfig, next);
+    persistHotkeyConfig();
+    installHotkey();
+    bot.log("cave hotkey config atualizado", { ...hotkeyConfig });
+    return { ...hotkeyConfig };
+  }
+
+  installHotkey();
+
+  startObserver();
+  bot.addCleanup(stopObserver);
+  startMinimapOverlay();
+  bot.addCleanup(stopMinimapOverlay);
+  bot.addCleanup(uninstallHotkey);
+
+  if (config.enabled && route.length) start();
+
+  bot.cave = {
+    start, stop, status, updateConfig, config,
+    hotkey: {
+      updateConfig: updateHotkeyConfig,
+      enable()  { hotkeyConfig.enabled = true;  persistHotkeyConfig(); bot.log("cave hotkey habilitado"); },
+      disable() { hotkeyConfig.enabled = false; persistHotkeyConfig(); bot.log("cave hotkey desabilitado"); },
+      status()  { return { ...hotkeyConfig }; },
+    },
+    getRoute, getTransitions, getPresetNames, getActivePresetName, getCurrentWaypoint,
+    createPreset, savePreset, loadPreset, deletePreset, exportPresets, importPresets,
+    addWaypoint, addWaypointCurrentSpot, addDelay, clearWaypoints, clearTransitions,
+    removeLastWaypoint, setCurrentIndex, goToWaypoint, goToPosition, handleFloorChange,
+    findClosestWaypointIndex, syncWaypointProgress, findRopeSource, findShovelSource,
+    inspectNearbyTiles: (radius = 1) => {
+      const position = normalizePosition(bot.getPlayerPosition());
+      if (!position) return [];
+      return getLoadedTiles()
+        .map((tile) => ({ tile, position: getTilePosition(tile) }))
+        .filter((entry) =>
+          entry.position &&
+          entry.position.z === position.z &&
+          Math.abs(entry.position.x - position.x) <= radius &&
+          Math.abs(entry.position.y - position.y) <= radius
+        )
+        .map((entry) => ({
+          position: entry.position,
+          isFloorChange: isFloorChangeTile(entry.tile),
+          isHole: isHoleTile(entry.tile),
+          isRopeTarget: isRopeTargetTile(entry.tile),
+          isShovelTarget: isShovelTargetTile(entry.tile),
+          names: getTileThings(entry.tile).map((thing) => getThingName(thing)).filter(Boolean),
+        }));
+    },
+    isAtWaypoint,
+  };
+};
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
@@ -6662,1575 +8107,6 @@ window.__minibiaBotBundle.installMeleePositionModule = function installMeleePosi
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
-
-window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
-  const configStorageKey = "minibiaBot.cave.config";
-  const routeStorageKey = "minibiaBot.cave.route";
-  const transitionStorageKey = "minibiaBot.cave.transitions";
-  const presetStorageKey = "minibiaBot.cave.presets";
-  const defaultPresetName = "Default";
-  const minimapOverlayRootId = "minibia-bot-cave-minimap-overlay";
-  const minimapOverlayStyleId = "minibia-bot-cave-minimap-overlay-style";
-  const ladderItemIds = new Set([1948, 1968]);
-  const ropeNamePattern = /\brope\b/i;
-  const shovelNamePattern = /\bshovel\b/i;
-  const shovelTargetNamePatterns = [
-    /\bstone pile\b/i,
-    /\bloose stone pile\b/i,
-    /\bgravel pile\b/i,
-    /\bdirt pile\b/i,
-  ];
-  const state = {
-    running: false,
-    timerId: null,
-    observerTimerId: null,
-    currentIndex: 0,
-    direction: 1,
-    lastPathAt: 0,
-    lastPositionKey: null,
-    lastProgressAt: 0,
-    lastStairsUseAt: 0,
-    lastObservedPosition: null,
-    pendingTransitionSource: null,
-    pausedForCombat: false,
-    pausedForCreatures: false,
-    pausedForSpawn: false,
-    delayUntil: 0,
-    delayWaypointIndex: null,
-  };
-  const minimapOverlayState = {
-    timerId: null,
-  };
-
-  // ── VELOCIDADE: valores padrão mais agressivos ──────────────
-  const config = Object.assign(
-    {
-      tickMs: 100,          // era 500 — 5x mais rápido
-      repathMs: 400,        // era 1500 — recalcula caminho bem mais rápido
-      observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
-      waypointTolerance: 2,
-      waypointLookahead: 12,
-      strictMode: false,    // Modo estrito inteligente (pula só se estiver mais perto)
-      maxProximitySkip: 3,  // Máximo de waypoints que pode pular se estiver mais perto
-      loopType: "reverse",  // "reverse" = volta ao fim | "restart" = pula pro 1º
-      pauseUntilClear: true,
-      pauseUntilSpawn: false,
-      pauseUntilSpawnFloorOffset: 1,
-      enabled: false,
-      activePresetName: defaultPresetName,
-    },
-    bot.storage.get(configStorageKey, {})
-  );
-
-  // NÃO forçamos mais tickMs=500 — deixamos o valor do config valer
-
-  function normalizePresetName(value) {
-    const normalized = String(value || "").trim().replace(/\s+/g, " ");
-    return normalized || null;
-  }
-
-  function cloneValue(value) {
-    return value ? JSON.parse(JSON.stringify(value)) : null;
-  }
-
-  function normalizePreset(value) {
-    if (!value) return null;
-    const name = normalizePresetName(value.name);
-    if (!name) return null;
-    return {
-      name,
-      route: normalizeRoute(value.route),
-      transitions: normalizeTransitions(value.transitions),
-    };
-  }
-
-  function normalizePresets(value) {
-    const entries = Array.isArray(value) ? value : [];
-    const deduped = new Map();
-    entries.map(normalizePreset).filter(Boolean).forEach((preset) => {
-      deduped.set(preset.name.toLowerCase(), preset);
-    });
-    return Array.from(deduped.values());
-  }
-
-  let route = normalizeRoute(bot.storage.get(routeStorageKey, []));
-  let transitions = normalizeTransitions(bot.storage.get(transitionStorageKey, []));
-  let presets = normalizePresets(bot.storage.get(presetStorageKey, []));
-
-  if (!presets.length && (route.length || transitions.length)) {
-    presets = [{
-      name: defaultPresetName,
-      route: route.map((waypoint) => cloneValue(waypoint)),
-      transitions: transitions.map((transition) => cloneValue(transition)),
-    }];
-  }
-
-  function getPresetNames() {
-    return presets.map((preset) => preset.name);
-  }
-
-  function getPresetByName(name) {
-    const normalizedName = normalizePresetName(name);
-    if (!normalizedName) return null;
-    return presets.find((preset) => preset.name.toLowerCase() === normalizedName.toLowerCase()) || null;
-  }
-
-  function getActivePresetName() {
-    const configuredName = normalizePresetName(config.activePresetName);
-    if (configuredName && getPresetByName(configuredName)) {
-      return getPresetByName(configuredName).name;
-    }
-    if (presets.length) return presets[0].name;
-    return configuredName || defaultPresetName;
-  }
-
-  function persistPresets() {
-    bot.storage.set(
-      presetStorageKey,
-      presets.map((preset) => ({
-        name: preset.name,
-        route: preset.route.map((waypoint) => ({ ...waypoint })),
-        transitions: preset.transitions.map((transition) => cloneValue(transition)),
-      }))
-    );
-  }
-
-  function persistLegacyActivePreset() {
-    bot.storage.set(routeStorageKey, route.map((waypoint) => ({ ...waypoint })));
-    bot.storage.set(transitionStorageKey, transitions.map((transition) => cloneValue(transition)));
-  }
-
-  function setActivePresetName(name) {
-    config.activePresetName = normalizePresetName(name) || defaultPresetName;
-    persistConfig();
-    return config.activePresetName;
-  }
-
-  function upsertPreset(name, nextRoute = route, nextTransitions = transitions) {
-    const normalizedName = normalizePresetName(name);
-    if (!normalizedName) return null;
-    const preset = {
-      name: normalizedName,
-      route: normalizeRoute(nextRoute).map((waypoint) => cloneValue(waypoint)),
-      transitions: normalizeTransitions(nextTransitions).map((transition) => cloneValue(transition)),
-    };
-    const existingIndex = presets.findIndex((entry) => entry.name.toLowerCase() === normalizedName.toLowerCase());
-    if (existingIndex >= 0) {
-      presets[existingIndex] = preset;
-    } else {
-      presets.push(preset);
-    }
-    persistPresets();
-    return preset;
-  }
-
-  function persistActivePreset() {
-    upsertPreset(getActivePresetName(), route, transitions);
-    persistLegacyActivePreset();
-  }
-
-  function loadPresetState(name) {
-    const preset = getPresetByName(name);
-    if (!preset) return null;
-    route = normalizeRoute(preset.route);
-    transitions = normalizeTransitions(preset.transitions);
-    state.currentIndex = 0;
-    state.direction = 1;
-    state.pendingTransitionSource = null;
-    setActivePresetName(preset.name);
-    persistLegacyActivePreset();
-    return preset;
-  }
-
-  const initialActivePreset = getActivePresetName();
-  if (loadPresetState(initialActivePreset)) {
-    config.activePresetName = initialActivePreset;
-  } else {
-    setActivePresetName(initialActivePreset);
-  }
-
-  function persistConfig() {
-    bot.storage.set(configStorageKey, { ...config });
-  }
-
-  function persistRoute() {
-    persistActivePreset();
-  }
-
-  function normalizePosition(value) {
-    if (!value) return null;
-    const x = Number(value.x);
-    const y = Number(value.y);
-    const z = Number(value.z);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-    return { x: Math.trunc(x), y: Math.trunc(y), z: Math.trunc(z) };
-  }
-
-  function normalizeWaypoint(waypoint) {
-    if (!waypoint) return null;
-    const type = String(waypoint.type || "").trim().toLowerCase();
-    if (type === "delay") {
-      const seconds = Math.max(1, Math.trunc(Number(waypoint.seconds)));
-      if (!Number.isFinite(seconds) || seconds <= 0) return null;
-      return { type: "delay", seconds };
-    }
-    const position = normalizePosition(waypoint);
-    if (!position) return null;
-    return { type: "position", ...position };
-  }
-
-  function normalizeRoute(value) {
-    if (!Array.isArray(value)) return [];
-    return value.map(normalizeWaypoint).filter(Boolean);
-  }
-
-  function normalizeTransition(transition) {
-    if (!transition) return null;
-    const from = normalizePosition(transition.from || transition);
-    const to = normalizePosition(transition.to || {
-      x: transition.targetX,
-      y: transition.targetY,
-      z: transition.targetZ,
-    });
-    if (!from || !to || from.z === to.z) return null;
-    const count = Math.max(1, Math.trunc(Number(transition.count) || 1));
-    const lastSeenAt = Math.max(0, Math.trunc(Number(transition.lastSeenAt) || Date.now()));
-    return { from, to, count, lastSeenAt };
-  }
-
-  function normalizeTransitions(value) {
-    if (!Array.isArray(value)) return [];
-    const deduped = new Map();
-    value.map(normalizeTransition).filter(Boolean).forEach((transition) => {
-      deduped.set(getPositionKey(transition.from), transition);
-    });
-    return Array.from(deduped.values());
-  }
-
-  function getRoute() {
-    return route.map((waypoint) => cloneValue(waypoint));
-  }
-
-  function getTransitions() {
-    return transitions.map((transition) => cloneValue(transition));
-  }
-
-  function persistTransitions() {
-    persistActivePreset();
-  }
-
-  function savePreset(name, options = {}) {
-    const preset = upsertPreset(name, route, transitions);
-    if (!preset) { bot.log("cave preset name is required"); return null; }
-    if (options.activate !== false) {
-      setActivePresetName(preset.name);
-      persistLegacyActivePreset();
-    }
-    bot.log("cave preset saved", { name: preset.name, waypoints: preset.route.length, transitions: preset.transitions.length });
-    return {
-      name: preset.name,
-      route: preset.route.map((waypoint) => cloneValue(waypoint)),
-      transitions: preset.transitions.map((transition) => cloneValue(transition)),
-    };
-  }
-
-  function createPreset(name) {
-    const normalizedName = normalizePresetName(name);
-    if (!normalizedName) { bot.log("cave preset name is required"); return null; }
-    if (getPresetByName(normalizedName)) { bot.log("cave preset already exists", { name: normalizedName }); return null; }
-    if (state.running) stop();
-    const preset = upsertPreset(normalizedName, [], []);
-    if (!preset) return null;
-    loadPresetState(preset.name);
-    bot.log("cave preset created", { name: preset.name });
-    return { name: preset.name, route: [], transitions: [] };
-  }
-
-  function loadPreset(name) {
-    const preset = getPresetByName(name);
-    if (!preset) { bot.log("cave preset not found", { name }); return null; }
-    if (state.running) stop();
-    loadPresetState(preset.name);
-    bot.log("cave preset loaded", { name: preset.name, waypoints: route.length, transitions: transitions.length });
-    return { name: preset.name, route: getRoute(), transitions: getTransitions() };
-  }
-
-  function deletePreset(name) {
-    const preset = getPresetByName(name);
-    if (!preset) { bot.log("cave preset not found", { name }); return false; }
-    presets = presets.filter((entry) => entry.name.toLowerCase() !== preset.name.toLowerCase());
-    persistPresets();
-    if (preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
-      const fallbackPreset = presets[0] || null;
-      if (state.running) stop();
-      if (fallbackPreset) {
-        loadPresetState(fallbackPreset.name);
-      } else {
-        route = [];
-        transitions = [];
-        state.currentIndex = 0;
-        state.direction = 1;
-        state.pendingTransitionSource = null;
-        setActivePresetName(defaultPresetName);
-        persistLegacyActivePreset();
-      }
-    }
-    bot.log("cave preset deleted", { name: preset.name });
-    return true;
-  }
-
-  function exportPresets() {
-    return {
-      version: 1,
-      activePresetName: getActivePresetName(),
-      presets: presets.map((preset) => ({
-        name: preset.name,
-        route: preset.route.map((waypoint) => cloneValue(waypoint)),
-        transitions: preset.transitions.map((transition) => cloneValue(transition)),
-      })),
-    };
-  }
-
-  function importPresets(value) {
-    let parsed = value;
-    if (typeof value === "string") {
-      try { parsed = JSON.parse(value); }
-      catch (error) { bot.log("cave preset import failed: invalid JSON", error?.message || error); return null; }
-    }
-    const payload = parsed && typeof parsed === "object" ? parsed : null;
-    const importedPresets = normalizePresets(payload?.presets || payload);
-    if (!importedPresets.length) { bot.log("cave preset import failed: no valid presets found"); return null; }
-    if (state.running) stop();
-    presets = importedPresets;
-    persistPresets();
-    const requestedActiveName = normalizePresetName(payload?.activePresetName);
-    const targetActivePreset = getPresetByName(requestedActiveName) || presets[0];
-    if (targetActivePreset) loadPresetState(targetActivePreset.name);
-    bot.log("cave presets imported", { presets: presets.length, activePresetName: getActivePresetName() });
-    return exportPresets();
-  }
-
-  function getCurrentWaypoint() {
-    if (!route.length) return null;
-    if (state.currentIndex < 0 || state.currentIndex >= route.length) state.currentIndex = 0;
-    return route[state.currentIndex] || null;
-  }
-
-  function isDelayWaypoint(waypoint) {
-    return !!waypoint && waypoint.type === "delay";
-  }
-
-  function getNearbyCreatures() {
-    const targetNames = bot.attack?.config?.targetNames;
-    const hasTargetFilter = Array.isArray(targetNames) && targetNames.length > 0;
-    if (!hasTargetFilter) return [];
-    return bot.attack?.getNearbyMonsters?.() || [];
-  }
-
-  function hasNearbyCreatures() {
-    return getNearbyCreatures().length > 0;
-  }
-
-  function shouldPauseForCreatures() {
-    return !!config.pauseUntilClear && hasNearbyCreatures();
-  }
-
-  function getAttackTargetNames() {
-    const targetNames = bot.attack?.config?.targetNames;
-    if (!Array.isArray(targetNames)) return [];
-    const deduped = new Map();
-    targetNames.forEach((name) => {
-      const normalized = String(name || "").trim();
-      if (!normalized) return;
-      deduped.set(normalized.toLowerCase(), normalized);
-    });
-    return Array.from(deduped.values());
-  }
-
-  function normalizeSpawnFloorOffset(value) {
-    if (!Number.isFinite(Number(value))) return 0;
-    return Math.trunc(Number(value));
-  }
-
-  function getSpawnWatchFloor(position = normalizePosition(bot.getPlayerPosition())) {
-    if (!position) return null;
-    return position.z - normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset);
-  }
-
-  function isTargetMonster(creature, targetNames) {
-    const name = String(creature?.name || "").trim().toLowerCase();
-    if (!name) return false;
-    return targetNames.some((targetName) => targetName.toLowerCase() === name);
-  }
-
-  function getSpawnFloorMonsters(position = normalizePosition(bot.getPlayerPosition())) {
-    const targetNames = getAttackTargetNames();
-    const targetFloor = getSpawnWatchFloor(position);
-    if (!targetNames.length || targetFloor == null) return [];
-    return (bot.xray?.getVisibleMonsters?.() || []).filter((creature) => {
-      const creatureFloor = Number(creature?.__position?.z ?? creature?.getPosition?.()?.z);
-      if (!Number.isFinite(creatureFloor) || creatureFloor !== targetFloor) return false;
-      return isTargetMonster(creature, targetNames);
-    });
-  }
-
-  function hasSpawnFloorMonster(position = normalizePosition(bot.getPlayerPosition())) {
-    return getSpawnFloorMonsters(position).length > 0;
-  }
-
-  function getSpawnWaitWaypointIndex() {
-    const index = route.findIndex((entry) => !isDelayWaypoint(entry));
-    return index >= 0 ? index : 0;
-  }
-
-  function isSpawnWaitWaypoint(waypoint, index = state.currentIndex) {
-    return index === getSpawnWaitWaypointIndex() && !!waypoint && !isDelayWaypoint(waypoint);
-  }
-
-  function shouldPauseForSpawn(position, waypoint) {
-    if (!config.pauseUntilSpawn || !getAttackTargetNames().length) return false;
-    if (!isSpawnWaitWaypoint(waypoint)) return false;
-    if (hasSpawnFloorMonster(position)) return false;
-    return isAtWaypoint(position, waypoint);
-  }
-
-  function resetDelayState() {
-    state.delayUntil = 0;
-    state.delayWaypointIndex = null;
-  }
-
-  function getPositionKey(position) {
-    return position ? `${position.x},${position.y},${position.z}` : null;
-  }
-
-  function getDistance(from, to) {
-    if (!from || !to || isDelayWaypoint(from) || isDelayWaypoint(to) || Number(from.z) !== Number(to.z)) {
-      return Number.POSITIVE_INFINITY;
-    }
-    return Math.abs(Number(from.x) - Number(to.x)) + Math.abs(Number(from.y) - Number(to.y));
-  }
-
-  function isBesideOrSameTile(from, to) {
-    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
-    return Math.abs(Number(from.x) - Number(to.x)) <= 1 && Math.abs(Number(from.y) - Number(to.y)) <= 1;
-  }
-
-  function isAdjacentTile(from, to) {
-    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
-    const dx = Math.abs(Number(from.x) - Number(to.x));
-    const dy = Math.abs(Number(from.y) - Number(to.y));
-    return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
-  }
-
-  function getDistanceToWaypoint(position, waypoint) {
-    if (!position || !waypoint || isDelayWaypoint(waypoint)) return null;
-    return getDistance(position, waypoint);
-  }
-
-  function isSameTile(a, b) {
-    if (!a || !b) return false;
-    return Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y) && Number(a.z) === Number(b.z);
-  }
-
-  function getWaypointLookahead() {
-    const value = Number(config.waypointLookahead);
-    if (!Number.isFinite(value) || value < 1) return 12;
-    return Math.trunc(value);
-  }
-
-  function findClosestWaypointIndex(position) {
-    if (!position || !route.length) return 0;
-    const tolerance = getWaypointTolerance();
-    let bestIndex = 0;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    route.forEach((waypoint, index) => {
-      if (isDelayWaypoint(waypoint)) return;
-      const distance = getDistanceToWaypoint(position, waypoint);
-      if (!Number.isFinite(distance)) return;
-      if (distance < bestDistance) { bestDistance = distance; bestIndex = index; return; }
-      if (distance <= bestDistance + tolerance && index < bestIndex) { bestIndex = index; bestDistance = distance; }
-    });
-    if (Number.isFinite(bestDistance)) return bestIndex;
-    const firstPositionIndex = route.findIndex((waypoint) => !isDelayWaypoint(waypoint));
-    return firstPositionIndex >= 0 ? firstPositionIndex : 0;
-  }
-
-  function findAheadWaypointIndex(position, fromIndex, direction) {
-    const startIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(fromIndex) || 0)));
-    const lookahead = getWaypointLookahead();
-    let bestIndex = startIndex;
-    let bestDistance = getDistanceToWaypoint(position, route[startIndex]);
-    if (direction > 0) {
-      const limit = Math.min(route.length - 1, startIndex + lookahead);
-      for (let index = startIndex + 1; index <= limit; index += 1) {
-        if (isDelayWaypoint(route[index])) continue;
-        const distance = getDistanceToWaypoint(position, route[index]);
-        if (!Number.isFinite(distance)) continue;
-        if (!Number.isFinite(bestDistance) || distance < bestDistance) { bestDistance = distance; bestIndex = index; }
-      }
-      return bestIndex;
-    }
-    const limit = Math.max(0, startIndex - lookahead);
-    for (let index = startIndex - 1; index >= limit; index -= 1) {
-      if (isDelayWaypoint(route[index])) continue;
-      const distance = getDistanceToWaypoint(position, route[index]);
-      if (!Number.isFinite(distance)) continue;
-      if (!Number.isFinite(bestDistance) || distance < bestDistance) { bestDistance = distance; bestIndex = index; }
-    }
-    return bestIndex;
-  }
-
-  function getTileAt(position) {
-    if (!position) return null;
-    return window.gameClient?.world?.getTileFromWorldPosition?.(
-      new Position(position.x, position.y, position.z)
-    ) || null;
-  }
-
-  function getTilePosition(tile) {
-    return normalizePosition(tile?.__position);
-  }
-
-  function getThingDefinition(itemId) {
-    if (!itemId) return null;
-    return (
-      window.gameClient?.itemDefinitionsByCid?.[itemId] ||
-      window.gameClient?.itemDefinitionsBySid?.[itemId] ||
-      window.gameClient?.itemDefinitions?.[itemId] ||
-      null
-    );
-  }
-
-  function getThingName(thing) {
-    const definition = getThingDefinition(thing?.id);
-    return String(definition?.properties?.name || thing?.name || "").trim().toLowerCase();
-  }
-
-  function isLadderThing(thing) {
-    if (!thing?.id) return false;
-    if (ladderItemIds.has(Number(thing.id))) return true;
-    return getThingName(thing).includes("ladder");
-  }
-
-  function isFloorChangeThing(thing) {
-    const definition = getThingDefinition(thing?.id);
-    return !!definition?.properties?.floorchange || isLadderThing(thing);
-  }
-
-  function isFloorChangeTile(tile) {
-    const tilePosition = getTilePosition(tile);
-    if (!tilePosition) return false;
-    if (isFloorChangeThing(tile)) return true;
-    return Array.isArray(tile.items) && tile.items.some((item) => isFloorChangeThing(item));
-  }
-
-  function getTileThings(tile) {
-    if (!tile) return [];
-    const things = [];
-    if (tile.id) things.push(tile);
-    if (Array.isArray(tile.items)) tile.items.forEach((item) => { if (item) things.push(item); });
-    return things;
-  }
-
-  function tileHasNamedThing(tile, needle) {
-    const value = String(needle || "").trim().toLowerCase();
-    if (!value) return false;
-    return getTileThings(tile).some((thing) => getThingName(thing).includes(value));
-  }
-
-  function isLadderTile(tile) { return getTileThings(tile).some((thing) => isLadderThing(thing)); }
-  function isStairsTile(tile) { return tileHasNamedThing(tile, "stairs"); }
-  function isHoleTile(tile) { return tileHasNamedThing(tile, "hole"); }
-  function isRopeSpotTile(tile) { return tileHasNamedThing(tile, "rope spot"); }
-  function isRopeTargetTile(tile) { return isHoleTile(tile) || isRopeSpotTile(tile); }
-
-  function isShovelTargetThing(thing) {
-    const name = getThingName(thing);
-    if (!name) return false;
-    return shovelTargetNamePatterns.some((pattern) => pattern.test(name));
-  }
-
-  function isShovelTargetTile(tile) {
-    return getTileThings(tile).some((thing) => isShovelTargetThing(thing));
-  }
-
-  function isTransitionCandidateTile(tile, waypoint, position) {
-    if (!tile) return false;
-    if (isFloorChangeTile(tile)) return true;
-    const hasWaypointDelta = waypoint && position && Number.isFinite(waypoint.z) && Number.isFinite(position.z);
-    if (!hasWaypointDelta) return false;
-    if (waypoint.z > position.z) return isShovelTargetTile(tile);
-    if (waypoint.z < position.z) return isRopeTargetTile(tile);
-    return false;
-  }
-
-  function getFloorChangeTileBias(tile, position, waypoint) {
-    if (!tile || !position || !waypoint || position.z === waypoint.z) return 0;
-    const goingDown = waypoint.z > position.z;
-    const goingUp = waypoint.z < position.z;
-    if (goingDown) {
-      if (isLadderTile(tile)) return -30;
-      if (isHoleTile(tile)) return -20;
-      if (isStairsTile(tile)) return 25;
-    }
-    if (goingUp) {
-      if (isStairsTile(tile)) return -20;
-      if (isHoleTile(tile)) return 20;
-    }
-    return 0;
-  }
-
-  function getLoadedTiles() {
-    const chunks = window.gameClient?.world?.chunks || [];
-    const tiles = [];
-    for (const chunk of chunks) {
-      if (!chunk?.tiles) continue;
-      for (const tile of chunk.tiles) {
-        if (tile?.__position) tiles.push(tile);
-      }
-    }
-    return tiles;
-  }
-
-  function ensureMinimapOverlayStyle() {
-    if (document.getElementById(minimapOverlayStyleId)) return;
-    const style = document.createElement("style");
-    style.id = minimapOverlayStyleId;
-    style.textContent = `
-      #${minimapOverlayRootId} { position: fixed; inset: 0; pointer-events: none; z-index: 999997; }
-      #${minimapOverlayRootId} canvas { position: fixed; pointer-events: none; }
-    `;
-    document.head.appendChild(style);
-  }
-
-  function ensureMinimapOverlayRoot() {
-    let root = document.getElementById(minimapOverlayRootId);
-    if (root) return root;
-    root = document.createElement("div");
-    root.id = minimapOverlayRootId;
-    root.innerHTML = '<canvas></canvas>';
-    document.body.appendChild(root);
-    return root;
-  }
-
-  function destroyMinimapOverlayElements() {
-    document.getElementById(minimapOverlayRootId)?.remove();
-    document.getElementById(minimapOverlayStyleId)?.remove();
-  }
-
-  function getMinimapCanvas() {
-    return window.gameClient?.renderer?.minimap?.minimap?.canvas || document.getElementById("minimap") || null;
-  }
-
-  function getMinimapViewport() {
-    const canvas = getMinimapCanvas();
-    if (!(canvas instanceof HTMLCanvasElement)) return null;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
-    return { canvas, rect };
-  }
-
-  function getWaypointCanvasPoint(waypoint, viewport, playerPosition, minimap) {
-    if (!waypoint || !viewport || !playerPosition || !minimap) return null;
-    if (isDelayWaypoint(waypoint)) return null;
-    if (waypoint.z !== minimap.__renderLayer) return null;
-    const zoomScale = 1 << (Number(minimap.__zoomLevel) || 0);
-    const center = minimap.center || { x: 0, y: 0 };
-    const internalWidth = Number(viewport.canvas.width) || 160;
-    const internalHeight = Number(viewport.canvas.height) || 160;
-    const internalX = (internalWidth / 2) + (waypoint.x - playerPosition.x - Number(center.x || 0)) * zoomScale;
-    const internalY = (internalHeight / 2) + (waypoint.y - playerPosition.y - Number(center.y || 0)) * zoomScale;
-    return {
-      x: internalX * (viewport.rect.width / internalWidth),
-      y: internalY * (viewport.rect.height / internalHeight),
-    };
-  }
-
-  function renderMinimapOverlay() {
-    const viewport = getMinimapViewport();
-    const minimap = window.gameClient?.renderer?.minimap;
-    const playerPosition = normalizePosition(bot.getPlayerPosition());
-    const root = ensureMinimapOverlayRoot();
-    const canvas = root.querySelector("canvas");
-    if (!(canvas instanceof HTMLCanvasElement)) return;
-    if (!viewport || !minimap || !playerPosition || !route.length) {
-      canvas.width = 0; canvas.height = 0; return;
-    }
-    const rect = viewport.rect;
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const width = Math.max(1, Math.round(rect.width));
-    const height = Math.max(1, Math.round(rect.height));
-    const pixelWidth = Math.round(width * dpr);
-    const pixelHeight = Math.round(height * dpr);
-    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-      canvas.width = pixelWidth; canvas.height = pixelHeight;
-    }
-    canvas.style.left = `${Math.round(rect.left)}px`;
-    canvas.style.top = `${Math.round(rect.top)}px`;
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    context.clearRect(0, 0, width, height);
-    const visibleWaypoints = route
-      .map((waypoint, index) => ({ waypoint, index, point: getWaypointCanvasPoint(waypoint, viewport, playerPosition, minimap) }))
-      .filter((entry) => entry.point);
-    if (!visibleWaypoints.length) return;
-    context.save();
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    for (let index = 1; index < visibleWaypoints.length; index += 1) {
-      const previous = visibleWaypoints[index - 1];
-      const current = visibleWaypoints[index];
-      if (current.index !== previous.index + 1) continue;
-      context.strokeStyle = "rgba(92, 228, 196, 0.7)";
-      context.lineWidth = 2;
-      context.beginPath();
-      context.moveTo(previous.point.x, previous.point.y);
-      context.lineTo(current.point.x, current.point.y);
-      context.stroke();
-    }
-    visibleWaypoints.forEach(({ point, index }) => {
-      const isCurrent = state.running && index === state.currentIndex;
-      const radius = isCurrent ? 7 : 5;
-      context.fillStyle = isCurrent ? "#ffcf5a" : "#2bd1c4";
-      context.strokeStyle = isCurrent ? "#6a2400" : "#083f49";
-      context.lineWidth = 2;
-      context.beginPath();
-      context.arc(point.x, point.y, radius, 0, Math.PI * 2);
-      context.fill();
-      context.stroke();
-      context.fillStyle = "#ffffff";
-      context.font = "bold 11px Verdana, sans-serif";
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      context.fillText(String(index + 1), point.x, point.y);
-    });
-    context.restore();
-  }
-
-  function startMinimapOverlay() {
-    if (minimapOverlayState.timerId != null) return;
-    ensureMinimapOverlayStyle();
-    renderMinimapOverlay();
-    minimapOverlayState.timerId = window.setInterval(renderMinimapOverlay, 250);
-  }
-
-  function stopMinimapOverlay() {
-    if (minimapOverlayState.timerId != null) {
-      window.clearInterval(minimapOverlayState.timerId);
-      minimapOverlayState.timerId = null;
-    }
-    destroyMinimapOverlayElements();
-  }
-
-  function getNearbyTransitionTiles(position, waypoint, radius = 8) {
-    if (!position) return [];
-    return getLoadedTiles()
-      .map((tile) => ({ tile, position: getTilePosition(tile) }))
-      .filter((entry) =>
-        entry.position &&
-        entry.position.z === position.z &&
-        Math.abs(entry.position.x - position.x) <= radius &&
-        Math.abs(entry.position.y - position.y) <= radius &&
-        isTransitionCandidateTile(entry.tile, waypoint, position)
-      );
-  }
-
-  function findTransitionTileNearPosition(position, waypoint, radius = 1) {
-    if (!position) return null;
-    let best = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
-      const distance = getDistance(position, entry.position);
-      if (!Number.isFinite(distance)) return;
-      if (distance < bestDistance) { bestDistance = distance; best = entry; }
-    });
-    return best;
-  }
-
-  function findBestKnownTransition(position, waypoint) {
-    if (!position || !waypoint) return null;
-    let best = null;
-    let bestScore = Number.POSITIVE_INFINITY;
-    transitions.forEach((transition) => {
-      if (transition.from.z !== position.z || transition.to.z !== waypoint.z) return;
-      const playerDistance = getDistance(position, transition.from);
-      const landingDistance = getDistance(transition.to, waypoint);
-      if (!Number.isFinite(playerDistance) || !Number.isFinite(landingDistance)) return;
-      const score = playerDistance * 10 + landingDistance;
-      if (score < bestScore) { bestScore = score; best = transition; }
-    });
-    return best;
-  }
-
-  function findNearbyTransitionTile(position, waypoint) {
-    if (!position || !waypoint) return null;
-    const waypointDistance = Math.abs(position.x - waypoint.x) + Math.abs(position.y - waypoint.y);
-    const radius = Math.max(4, Math.min(20, waypointDistance + 2));
-    let best = null;
-    let bestScore = Number.POSITIVE_INFINITY;
-    getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
-      const playerDistance = getDistance(position, entry.position);
-      const tileToWaypointDistance = Math.abs(entry.position.x - waypoint.x) + Math.abs(entry.position.y - waypoint.y);
-      const score = playerDistance * 10 + tileToWaypointDistance + getFloorChangeTileBias(entry.tile, position, waypoint);
-      if (score < bestScore) {
-        bestScore = score;
-        best = { tile: entry.tile, position: entry.position, playerDistance, waypointDistance: tileToWaypointDistance };
-      }
-    });
-    return best;
-  }
-
-  function getWaypointTolerance() {
-    const value = Number(config.waypointTolerance);
-    if (!Number.isFinite(value) || value < 0) return 2;
-    return Math.trunc(value);
-  }
-
-  function findNextPositionIndex(startIndex, direction = 1) {
-    let index = Math.trunc(Number(startIndex) || 0);
-    while (index >= 0 && index < route.length) {
-      if (!isDelayWaypoint(route[index])) return index;
-      index += direction;
-    }
-    return Math.max(0, Math.min(route.length - 1, Math.trunc(Number(startIndex) || 0)));
-  }
-
-  function syncWaypointProgress(position) {
-    if (!position || !route.length) return false;
-    const previousIndex = state.currentIndex;
-    const direction = state.direction >= 0 ? 1 : -1;
-    if (direction > 0) {
-      let index = state.currentIndex;
-      while (index < route.length) {
-        const waypoint = route[index];
-        if (isDelayWaypoint(waypoint) || !isAtWaypoint(position, waypoint)) break;
-        index += 1;
-      }
-      if (index !== state.currentIndex) {
-        if (index >= route.length) { 
-          if (config.loopType === "restart") {
-            state.currentIndex = 0;
-            state.direction = 1;
-            bot.log("cave reached end, restarting from waypoint 1");
-          } else {
-            state.currentIndex = route.length - 1;
-            state.direction = -1;
-            bot.log("cave reached end, reversing direction");
-          }
-        }
-        else { state.currentIndex = index; }
-      }
-    } else {
-      let index = state.currentIndex;
-      while (index >= 0) {
-        const waypoint = route[index];
-        if (isDelayWaypoint(waypoint) || !isAtWaypoint(position, waypoint)) break;
-        index -= 1;
-      }
-      if (index !== state.currentIndex) {
-        if (index < 0) { 
-          if (config.loopType === "restart") {
-            state.currentIndex = route.length - 1;
-            state.direction = 1;
-            bot.log("cave reached start, restarting from waypoint " + route.length);
-          } else {
-            state.currentIndex = 0;
-            state.direction = 1;
-          }
-        }
-        else { state.currentIndex = index; }
-      }
-    }
-    const currentWaypoint = getCurrentWaypoint();
-    const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
-    
-    // ── MODO ESTRITO INTELIGENTE ────────────────────────────────
-    if (config.strictMode && Number.isFinite(currentDistance)) {
-      const maxSkip = Math.max(1, Number(config.maxProximitySkip) || 3);
-      const searchStart = direction > 0 ? state.currentIndex + 1 : state.currentIndex - 1;
-      const searchEnd = direction > 0 ? Math.min(route.length, state.currentIndex + maxSkip + 1) : Math.max(-1, state.currentIndex - maxSkip - 1);
-      
-      if (direction > 0) {
-        for (let i = searchStart; i < searchEnd; i++) {
-          if (i >= 0 && i < route.length) {
-            const waypoint = route[i];
-            if (!isDelayWaypoint(waypoint)) {
-              const distance = getDistanceToWaypoint(position, waypoint);
-              if (Number.isFinite(distance) && distance < currentDistance) {
-                state.currentIndex = i;
-                resetDelayState();
-                bot.log("cave jumped by proximity", { from: previousIndex + 1, to: state.currentIndex + 1, skipAmount: i - previousIndex, mode: "strict-smart" });
-                return true;
-              }
-            }
-          }
-        }
-      } else {
-        for (let i = searchStart; i > searchEnd; i--) {
-          if (i >= 0 && i < route.length) {
-            const waypoint = route[i];
-            if (!isDelayWaypoint(waypoint)) {
-              const distance = getDistanceToWaypoint(position, waypoint);
-              if (Number.isFinite(distance) && distance < currentDistance) {
-                state.currentIndex = i;
-                resetDelayState();
-                bot.log("cave jumped by proximity", { from: previousIndex + 1, to: state.currentIndex + 1, skipAmount: previousIndex - i, mode: "strict-smart" });
-                return true;
-              }
-            }
-          }
-        }
-      }
-    }
-    // ───────────────────────────────────────────────────────────
-    
-    const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
-    if (!Number.isFinite(currentDistance)) {
-      if (previousIndex !== state.currentIndex) {
-        resetDelayState();
-        bot.log("cave synced waypoint progress", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, direction: state.direction, waypoint: getCurrentWaypoint() });
-        return true;
-      }
-      return false;
-    }
-    if (direction > 0 && aheadIndex > state.currentIndex) {
-      const aheadWaypoint = route[aheadIndex];
-      const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
-      if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
-        let nextIndex = findNextPositionIndex(aheadIndex, 1);
-        if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
-          const afterAhead = aheadIndex + 1;
-          if (afterAhead < route.length) nextIndex = findNextPositionIndex(afterAhead, 1);
-        } else {
-          const afterIndex = aheadIndex + 1;
-          if (afterIndex < route.length) {
-            const afterWaypoint = route[afterIndex];
-            const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
-            if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, 1);
-          }
-        }
-        if (nextIndex > state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
-      }
-    } else if (direction < 0 && aheadIndex < state.currentIndex) {
-      const aheadWaypoint = route[aheadIndex];
-      const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
-      if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
-        let nextIndex = findNextPositionIndex(aheadIndex, -1);
-        if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
-          const afterAhead = aheadIndex - 1;
-          if (afterAhead >= 0) nextIndex = findNextPositionIndex(afterAhead, -1);
-        } else {
-          const afterIndex = aheadIndex - 1;
-          if (afterIndex >= 0) {
-            const afterWaypoint = route[afterIndex];
-            const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
-            if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, -1);
-          }
-        }
-        if (nextIndex < state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
-      }
-    }
-    if (previousIndex !== state.currentIndex) {
-      bot.log("cave synced waypoint progress", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, direction: state.direction, aheadWaypoint: aheadIndex + 1, waypoint: getCurrentWaypoint() });
-      return true;
-    }
-    return false;
-  }
-
-  function isAtWaypoint(position, waypoint) {
-    const distance = getDistanceToWaypoint(position, waypoint);
-    if (!Number.isFinite(distance)) return false;
-    return distance <= getWaypointTolerance();
-  }
-
-  function goToWaypoint(waypoint) {
-    const from = bot.getPlayerPosition();
-    if (!from || !waypoint || isDelayWaypoint(waypoint)) return false;
-    const to = new Position(waypoint.x, waypoint.y, waypoint.z);
-    try {
-      window.gameClient?.world?.pathfinder?.findPath?.(from, to);
-      state.lastPathAt = Date.now();
-      bot.log("cave pathing to waypoint", { ...waypoint, index: state.currentIndex + 1, total: route.length });
-      return true;
-    } catch (error) {
-      bot.log("cave pathing failed", { ...waypoint, error: error?.message || error });
-      return false;
-    }
-  }
-
-  function goToPosition(position) {
-    if (!position) return false;
-    return goToWaypoint(position);
-  }
-
-  function markPendingTransitionSource(source) {
-    const normalized = normalizePosition(source);
-    if (!normalized) return;
-    state.pendingTransitionSource = { ...normalized, at: Date.now() };
-  }
-
-  function upsertTransition(from, to) {
-    const normalizedFrom = normalizePosition(from);
-    const normalizedTo = normalizePosition(to);
-    if (!normalizedFrom || !normalizedTo || normalizedFrom.z === normalizedTo.z) return null;
-    const key = getPositionKey(normalizedFrom);
-    const index = transitions.findIndex((transition) => getPositionKey(transition.from) === key);
-    const next = {
-      from: normalizedFrom,
-      to: normalizedTo,
-      count: index >= 0 ? transitions[index].count + 1 : 1,
-      lastSeenAt: Date.now(),
-    };
-    if (index >= 0) { transitions[index] = next; } else { transitions.push(next); }
-    persistTransitions();
-    bot.log("cave learned floor transition", next);
-    return cloneValue(next);
-  }
-
-  function resolveObservedTransitionSource(previousPosition) {
-    const pending = normalizePosition(state.pendingTransitionSource);
-    if (pending && pending.z === previousPosition.z) return pending;
-    const currentTile = getTileAt(previousPosition);
-    if (currentTile && isFloorChangeTile(currentTile)) return previousPosition;
-    const nearby = findTransitionTileNearPosition(previousPosition, null, 1);
-    if (nearby?.position) return nearby.position;
-    return null;
-  }
-
-  function observePosition() {
-    const current = normalizePosition(bot.getPlayerPosition());
-    if (!current) return;
-    const previous = state.lastObservedPosition;
-    if (previous && !isSameTile(previous, current) && previous.z !== current.z) {
-      const source = resolveObservedTransitionSource(previous);
-      if (source) upsertTransition(source, current);
-      state.pendingTransitionSource = null;
-    }
-    state.lastObservedPosition = current;
-  }
-
-  function getEquipment() { return window.gameClient?.player?.equipment || null; }
-  function getOpenContainers() { return Array.from(window.gameClient?.player?.__openedContainers || []); }
-
-  function findAdjacentWalkablePosition(targetPosition, playerPosition) {
-    if (!targetPosition || !playerPosition) return null;
-    const offsets = [
-      { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
-      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
-    ];
-    offsets.sort((a, b) => {
-      const da = Math.abs(targetPosition.x + a.x - playerPosition.x) + Math.abs(targetPosition.y + a.y - playerPosition.y);
-      const db = Math.abs(targetPosition.x + b.x - playerPosition.x) + Math.abs(targetPosition.y + b.y - playerPosition.y);
-      return da - db;
-    });
-    for (const offset of offsets) {
-      const position = new Position(targetPosition.x + offset.x, targetPosition.y + offset.y, targetPosition.z);
-      const tile = window.gameClient?.world?.getTileFromWorldPosition?.(position);
-      if (tile?.isWalkable?.()) return normalizePosition(position);
-    }
-    return null;
-  }
-
-  function isRopeItem(item) { const name = getThingName(item); return !!name && ropeNamePattern.test(name); }
-  function isShovelItem(item) { const name = getThingName(item); return !!name && shovelNamePattern.test(name); }
-
-  function findToolSource(predicate) {
-    const equipment = getEquipment();
-    if (equipment?.slots) {
-      for (let slotIndex = 0; slotIndex < equipment.slots.length; slotIndex += 1) {
-        const item = equipment.getSlotItem?.(slotIndex);
-        if (predicate(item)) return { which: equipment, index: slotIndex, item, location: "equipment" };
-      }
-    }
-    for (const container of getOpenContainers()) {
-      const slots = container?.slots || [];
-      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
-        const item = container.getSlotItem?.(slotIndex);
-        if (predicate(item)) return { which: container, index: slotIndex, item, location: "container" };
-      }
-    }
-    return null;
-  }
-
-  function findRopeSource() { return findToolSource(isRopeItem); }
-  function findShovelSource() { return findToolSource(isShovelItem); }
-
-  function useToolOnTile(tool, targetTile, targetPosition, actionLabel, now = Date.now()) {
-    if (!tool || !targetTile || !targetPosition) return false;
-    const playerPosition = normalizePosition(bot.getPlayerPosition());
-    if (!playerPosition) return false;
-    if (!isAdjacentTile(playerPosition, targetPosition)) {
-      const adjacentPosition = findAdjacentWalkablePosition(targetPosition, playerPosition);
-      if (adjacentPosition) return goToPosition(adjacentPosition);
-    }
-    window.gameClient?.mouse?.__handleItemUseWith?.(
-      { which: tool.which, index: tool.index },
-      { which: targetTile, index: 0xFF }
-    );
-    state.lastStairsUseAt = now;
-    state.lastPathAt = now;
-    markPendingTransitionSource(targetPosition);
-    bot.log(actionLabel, { source: targetPosition, toolLocation: tool.location, toolSlot: tool.index, toolName: getThingName(tool.item) });
-    return true;
-  }
-
-  function useRopeOnTile(targetTile, targetPosition, now = Date.now()) {
-    return useToolOnTile(findRopeSource(), targetTile, targetPosition, "cave roped transition tile", now);
-  }
-
-  function useShovelOnTile(targetTile, targetPosition, now = Date.now()) {
-    return useToolOnTile(findShovelSource(), targetTile, targetPosition, "cave shoveled transition tile", now);
-  }
-
-  function useFloorChangeTile(target, waypoint, now = Date.now()) {
-    const position = normalizePosition(bot.getPlayerPosition());
-    const targetPosition = normalizePosition(target?.position);
-    const targetTile = target?.tile || (targetPosition ? getTileAt(targetPosition) : null);
-    if (!position || !targetPosition || !targetTile) return false;
-    if (now - state.lastStairsUseAt < 1200) return true;
-    if (waypoint?.z < position.z && isRopeTargetTile(targetTile)) return useRopeOnTile(targetTile, targetPosition, now);
-    if (!isFloorChangeTile(targetTile)) {
-      if (waypoint?.z > position.z && isShovelTargetTile(targetTile)) return useShovelOnTile(targetTile, targetPosition, now);
-      return false;
-    }
-    if (isLadderTile(targetTile)) {
-      window.gameClient?.mouse?.use?.({ which: targetTile, index: 0xFF });
-      state.lastStairsUseAt = now;
-      state.lastPathAt = now;
-      markPendingTransitionSource(targetPosition);
-      bot.log("cave used ladder tile", { source: targetPosition, targetZ: waypoint?.z ?? null });
-      return true;
-    }
-    if (!isSameTile(position, targetPosition)) return goToPosition(targetPosition);
-    const currentTile = getTileAt(position);
-    if (!currentTile || !isFloorChangeTile(currentTile)) return false;
-    window.gameClient?.mouse?.use?.({ which: currentTile, index: 0xFF });
-    state.lastStairsUseAt = now;
-    state.lastPathAt = now;
-    markPendingTransitionSource(position);
-    bot.log("cave used floor-change tile", { source: position, targetZ: waypoint?.z ?? null });
-    return true;
-  }
-
-  function handleFloorChange(waypoint, now = Date.now()) {
-    const position = normalizePosition(bot.getPlayerPosition());
-    if (!position || !waypoint || position.z === waypoint.z) return false;
-    const visibleCandidate = findNearbyTransitionTile(position, waypoint);
-    if (visibleCandidate) {
-      const moved = useFloorChangeTile(visibleCandidate, waypoint, now);
-      if (moved) {
-        bot.log("cave probing visible floor-change tile", { tileX: visibleCandidate.position.x, tileY: visibleCandidate.position.y, tileZ: visibleCandidate.position.z, targetZ: waypoint.z });
-        return true;
-      }
-    }
-    const knownTransition = findBestKnownTransition(position, waypoint);
-    if (knownTransition) {
-      const target = { tile: getTileAt(knownTransition.from), position: knownTransition.from };
-      const moved = useFloorChangeTile(target, waypoint, now);
-      if (moved) {
-        bot.log("cave using learned floor transition", { from: knownTransition.from, to: knownTransition.to, waypoint });
-        return true;
-      }
-      bot.log("cave learned transition unavailable, falling back to live scan", { from: knownTransition.from, to: knownTransition.to, waypoint });
-    }
-    return false;
-  }
-
-  function advanceWaypoint() {
-    if (!route.length) return null;
-    if (route.length === 1) return route[0];
-    let nextIndex = state.currentIndex + state.direction;
-    if (nextIndex >= route.length) { 
-      if (config.loopType === "restart") {
-        state.direction = 1;
-        nextIndex = 0;
-        bot.log("cave waypoint advanced: reached end, restarting from waypoint 1");
-      } else {
-        state.direction = -1;
-        nextIndex = route.length - 2;
-      }
-    }
-    else if (nextIndex < 0) { 
-      if (config.loopType === "restart") {
-        state.direction = 1;
-        nextIndex = route.length - 1;
-        bot.log("cave waypoint advanced: reached start, restarting from last waypoint");
-      } else {
-        state.direction = 1;
-        nextIndex = 1;
-      }
-    }
-    state.currentIndex = Math.max(0, Math.min(route.length - 1, nextIndex));
-    const nextWaypoint = getCurrentWaypoint();
-    resetDelayState();
-    bot.log("cave advanced waypoint", { index: state.currentIndex + 1, total: route.length, direction: state.direction, waypoint: nextWaypoint });
-    return nextWaypoint;
-  }
-
-  function scheduleNextTick() {
-    if (!state.running) return;
-    state.timerId = window.setTimeout(tick, config.tickMs);
-  }
-
-  function tick() {
-    if (!state.running) return;
-    try {
-      observePosition();
-      if (!route.length) { stop(); return; }
-      const position = normalizePosition(bot.getPlayerPosition());
-      const positionKey = getPositionKey(position);
-      const now = Date.now();
-      const attackStatus = bot.attack?.status?.() || null;
-      const shouldPauseForCombat = !!attackStatus?.combatActive && Number(attackStatus?.combatDurationMs || 0) < 60000;
-      if (shouldPauseForCombat) {
-        if (!state.pausedForCombat) { state.pausedForCombat = true; bot.log("cave paused for auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
-        return;
-      }
-      if (state.pausedForCombat) { state.pausedForCombat = false; bot.log("cave resumed after auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
-      if (shouldPauseForCreatures()) {
-        if (!state.pausedForCreatures) { state.pausedForCreatures = true; const nearby = getNearbyCreatures(); bot.log("cave paused until area clear", { creatureCount: nearby.length, creatures: nearby.map((c) => c.name || "Mob") }); }
-        return;
-      }
-      if (state.pausedForCreatures) { state.pausedForCreatures = false; bot.log("cave resumed after area clear"); }
-      let waypoint = getCurrentWaypoint();
-      if (!waypoint) { stop(); return; }
-      if (shouldPauseForSpawn(position, waypoint)) {
-        if (!state.pausedForSpawn) { state.pausedForSpawn = true; bot.log("cave paused until target monster spawns", { floorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset), watchFloor: getSpawnWatchFloor(position), targetNames: getAttackTargetNames() }); }
-        return;
-      }
-      if (state.pausedForSpawn) {
-        state.pausedForSpawn = false;
-        if (hasSpawnFloorMonster(position)) { const spawned = getSpawnFloorMonsters(position); bot.log("cave resumed after target monster spawned", { floorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset), watchFloor: getSpawnWatchFloor(position), creatures: spawned.map((c) => c.name || "Mob") }); }
-      }
-      syncWaypointProgress(position);
-      waypoint = getCurrentWaypoint();
-      if (!waypoint) { stop(); return; }
-      if (positionKey && positionKey !== state.lastPositionKey) { state.lastPositionKey = positionKey; state.lastProgressAt = now; }
-      if (isDelayWaypoint(waypoint)) {
-        if (state.delayWaypointIndex !== state.currentIndex || !state.delayUntil) {
-          state.delayWaypointIndex = state.currentIndex;
-          state.delayUntil = now + (Math.max(1, Number(waypoint.seconds) || 1) * 1000);
-          bot.log("cave delay started", { index: state.currentIndex + 1, total: route.length, seconds: Math.max(1, Number(waypoint.seconds) || 1) });
-        }
-        if (now < state.delayUntil) return;
-        bot.log("cave delay completed", { index: state.currentIndex + 1, total: route.length });
-        waypoint = advanceWaypoint();
-        if (!waypoint) return;
-      }
-      if (isAtWaypoint(position, waypoint) && !isDelayWaypoint(waypoint)) { waypoint = advanceWaypoint(); }
-      if (!waypoint) return;
-      if (position && waypoint.z !== position.z) { handleFloorChange(waypoint, now); return; }
-
-      // ── VELOCIDADE: repath mais agressivo ──────────────────
-      const shouldRepath =
-        now - state.lastPathAt >= config.repathMs ||
-        !state.lastProgressAt ||
-        now - state.lastProgressAt >= config.repathMs;
-
-      if (shouldRepath) goToWaypoint(waypoint);
-
-    } catch (error) {
-      bot.log("cave tick failed", error?.message || error);
-    } finally {
-      scheduleNextTick();
-    }
-  }
-
-  function startObserver() {
-    if (state.observerTimerId != null) return;
-    // ── VELOCIDADE: observer a cada 50ms (era 200ms) ────────
-    state.observerTimerId = window.setInterval(() => {
-      try { observePosition(); }
-      catch (error) { bot.log("cave observer failed", error?.message || error); }
-    }, config.observerMs);
-  }
-
-  function stopObserver() {
-    if (state.observerTimerId == null) return;
-    window.clearInterval(state.observerTimerId);
-    state.observerTimerId = null;
-  }
-
-  function start(overrides = {}) {
-    Object.assign(config, overrides, { enabled: true });
-    // ── NÃO forçamos tickMs=500 aqui ────────────────────────
-    persistConfig();
-    if (!route.length) { bot.log("cave bot cannot start without waypoints"); return false; }
-    const hasPositionWaypoint = route.some((waypoint) => !isDelayWaypoint(waypoint));
-    if (!hasPositionWaypoint) { bot.log("cave bot cannot start without position waypoints"); return false; }
-    if (state.running) { bot.log("cave bot already running"); return false; }
-    const position = normalizePosition(bot.getPlayerPosition());
-    state.running = true;
-    state.currentIndex = findClosestWaypointIndex(position);
-    state.direction = state.currentIndex >= route.length - 1 ? -1 : 1;
-    if (route.length <= 1) state.direction = 1;
-    state.lastPathAt = 0;
-    state.lastPositionKey = getPositionKey(position);
-    state.lastProgressAt = Date.now();
-    state.pausedForCombat = false;
-    state.pausedForCreatures = false;
-    state.pausedForSpawn = false;
-    resetDelayState();
-    bot.log("cave bot started", { waypoints: route.length, currentIndex: state.currentIndex + 1, direction: state.direction, waypoint: getCurrentWaypoint(), tickMs: config.tickMs, repathMs: config.repathMs, observerMs: config.observerMs });
-    tick();
-    return true;
-  }
-
-  function stop(options = {}) {
-    const shouldPersistEnabled = options.persistEnabled !== false;
-    state.running = false;
-    if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
-    if (shouldPersistEnabled) { config.enabled = false; persistConfig(); }
-    state.pausedForCombat = false;
-    state.pausedForCreatures = false;
-    state.pausedForSpawn = false;
-    resetDelayState();
-    bot.log("cave bot stopped");
-    return true;
-  }
-
-  function addWaypoint(waypoint) {
-    const normalized = normalizeWaypoint(waypoint);
-    if (!normalized) return null;
-    route.push(normalized);
-    persistRoute();
-    bot.log("cave waypoint added", { ...normalized, total: route.length });
-    return cloneValue(normalized);
-  }
-
-  function addWaypointCurrentSpot() {
-    const position = normalizePosition(bot.getPlayerPosition());
-    if (!position) { bot.log("could not read current position for cave waypoint"); return null; }
-    return addWaypoint(position);
-  }
-
-  function addDelay(seconds) {
-    const normalizedSeconds = Math.max(1, Math.trunc(Number(seconds) || 0));
-    if (!Number.isFinite(normalizedSeconds) || normalizedSeconds <= 0) { bot.log("invalid cave delay", { seconds }); return null; }
-    const delayWaypoint = { type: "delay", seconds: normalizedSeconds };
-    route.push(delayWaypoint);
-    persistRoute();
-    bot.log("cave delay added", { ...delayWaypoint, total: route.length });
-    return cloneValue(delayWaypoint);
-  }
-
-  function clearWaypoints() {
-    route = [];
-    state.currentIndex = 0;
-    state.direction = 1;
-    resetDelayState();
-    persistRoute();
-    bot.log("cave route cleared");
-    if (state.running) stop();
-    return [];
-  }
-
-  function clearTransitions() {
-    transitions = [];
-    state.pendingTransitionSource = null;
-    persistTransitions();
-    bot.log("cave learned transitions cleared");
-    return [];
-  }
-
-  function removeLastWaypoint() {
-    if (!route.length) return null;
-    const removed = route.pop();
-    if (state.currentIndex >= route.length) { state.currentIndex = Math.max(0, route.length - 1); resetDelayState(); }
-    if (route.length <= 1) state.direction = 1;
-    persistRoute();
-    bot.log("cave waypoint removed", removed);
-    if (!route.length && state.running) stop();
-    return removed;
-  }
-
-  function setCurrentIndex(index) {
-    if (!route.length) { state.currentIndex = 0; state.direction = 1; return 0; }
-    const nextIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(index) || 0)));
-    state.currentIndex = nextIndex;
-    resetDelayState();
-    state.direction = nextIndex >= route.length - 1 ? -1 : 1;
-    if (route.length <= 1) state.direction = 1;
-    return state.currentIndex;
-  }
-
-  function status() {
-    const position = normalizePosition(bot.getPlayerPosition());
-    const waypoint = getCurrentWaypoint();
-    return {
-      running: state.running,
-      config: { ...config },
-      route: getRoute(),
-      transitions: getTransitions(),
-      presetNames: getPresetNames(),
-      activePresetName: getActivePresetName(),
-      currentIndex: state.currentIndex,
-      direction: state.direction,
-      currentWaypoint: cloneValue(waypoint),
-      distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
-      lastPathAt: state.lastPathAt,
-      lastProgressAt: state.lastProgressAt,
-      pendingTransitionSource: cloneValue(state.pendingTransitionSource),
-      pausedForCombat: state.pausedForCombat,
-      pausedForCreatures: state.pausedForCreatures,
-      pausedForSpawn: state.pausedForSpawn,
-      nearbyCreatureCount: getNearbyCreatures().length,
-      spawnFloorCreatureCount: getSpawnFloorMonsters(position).length,
-      spawnWatchFloor: getSpawnWatchFloor(position),
-      spawnFloorOffset: normalizeSpawnFloorOffset(config.pauseUntilSpawnFloorOffset),
-    };
-  }
-
-  function updateConfig(nextConfig = {}) {
-    if ("pauseUntilSpawnFloorOffset" in nextConfig) nextConfig.pauseUntilSpawnFloorOffset = normalizeSpawnFloorOffset(nextConfig.pauseUntilSpawnFloorOffset);
-    if ("waypointTolerance" in nextConfig) nextConfig.waypointTolerance = Math.max(0, Math.trunc(Number(nextConfig.waypointTolerance) || 0));
-    if ("waypointLookahead" in nextConfig) nextConfig.waypointLookahead = Math.max(1, Math.trunc(Number(nextConfig.waypointLookahead) || 12));
-    if ("maxProximitySkip" in nextConfig) nextConfig.maxProximitySkip = Math.max(1, Math.trunc(Number(nextConfig.maxProximitySkip) || 3));
-    if ("strictMode" in nextConfig) nextConfig.strictMode = !!nextConfig.strictMode;
-    if ("loopType" in nextConfig) nextConfig.loopType = (["reverse", "restart"].includes(String(nextConfig.loopType)) ? nextConfig.loopType : "reverse");
-    // ── VELOCIDADE: valida tickMs e repathMs sem forçar 500 ─
-    if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
-    if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
-    if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
-    Object.assign(config, nextConfig);
-    persistConfig();
-    bot.log("cave config updated", { ...config });
-    return { ...config };
-  }
-
-  // ── HOTKEY ─────────────────────────────────────────────────
-  const hotkeyConfigKey = "minibiaBot.caveHotkey.config";
-  const hotkeyConfig = Object.assign(
-    { stopKey: "Delete", startKey: "Insert", enabled: true },
-    bot.storage.get(hotkeyConfigKey, {})
-  );
-
-  function persistHotkeyConfig() { bot.storage.set(hotkeyConfigKey, { ...hotkeyConfig }); }
-
-  function showHotkeyToast(text) {
-    const existing = document.getElementById("minibia-cave-hotkey-toast");
-    if (existing) existing.remove();
-    const toast = document.createElement("div");
-    toast.id = "minibia-cave-hotkey-toast";
-    toast.textContent = text;
-    Object.assign(toast.style, {
-      position: "fixed", bottom: "80px", left: "50%", transform: "translateX(-50%)",
-      background: "rgba(0,0,0,0.82)", color: "#fff", padding: "8px 18px",
-      borderRadius: "8px", fontSize: "14px", fontFamily: "monospace",
-      zIndex: "999999", pointerEvents: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-      transition: "opacity 0.3s",
-    });
-    document.body.appendChild(toast);
-    setTimeout(() => { toast.style.opacity = "0"; }, 1800);
-    setTimeout(() => { toast.remove(); }, 2200);
-  }
-
-  function onCaveHotkey(e) {
-    if (!hotkeyConfig.enabled) return;
-    const tag = document.activeElement?.tagName?.toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return;
-
-    if (e.key === hotkeyConfig.stopKey) {
-      e.preventDefault();
-      if (state.running) {
-        stop();
-        bot.log("cavebot parado pela hotkey " + hotkeyConfig.stopKey);
-        showHotkeyToast("🛑 CaveBot parado (" + hotkeyConfig.stopKey + ")");
-      }
-      return;
-    }
-
-    if (e.key === hotkeyConfig.startKey) {
-      e.preventDefault();
-      if (!state.running) {
-        const started = start();
-        if (started) {
-          bot.log("cavebot iniciado pela hotkey " + hotkeyConfig.startKey);
-          showHotkeyToast("▶️ CaveBot iniciado (" + hotkeyConfig.startKey + ")");
-        } else {
-          showHotkeyToast("⚠️ CaveBot sem waypoints");
-        }
-      }
-      return;
-    }
-  }
-
-  function installHotkey() {
-    if (window.__caveHotkeyListener) {
-      document.removeEventListener("keydown", window.__caveHotkeyListener, true);
-    }
-    window.__caveHotkeyListener = onCaveHotkey;
-    document.addEventListener("keydown", onCaveHotkey, true);
-    bot.log("cave hotkey instalado — stop:" + hotkeyConfig.stopKey + " | start:" + hotkeyConfig.startKey);
-  }
-
-  function uninstallHotkey() {
-    if (window.__caveHotkeyListener) {
-      document.removeEventListener("keydown", window.__caveHotkeyListener, true);
-      window.__caveHotkeyListener = null;
-    }
-  }
-
-  function updateHotkeyConfig(next = {}) {
-    Object.assign(hotkeyConfig, next);
-    persistHotkeyConfig();
-    installHotkey();
-    bot.log("cave hotkey config atualizado", { ...hotkeyConfig });
-    return { ...hotkeyConfig };
-  }
-
-  installHotkey();
-
-  startObserver();
-  bot.addCleanup(stopObserver);
-  startMinimapOverlay();
-  bot.addCleanup(stopMinimapOverlay);
-  bot.addCleanup(uninstallHotkey);
-
-  if (config.enabled && route.length) start();
-
-  bot.cave = {
-    start, stop, status, updateConfig, config,
-    hotkey: {
-      updateConfig: updateHotkeyConfig,
-      enable()  { hotkeyConfig.enabled = true;  persistHotkeyConfig(); bot.log("cave hotkey habilitado"); },
-      disable() { hotkeyConfig.enabled = false; persistHotkeyConfig(); bot.log("cave hotkey desabilitado"); },
-      status()  { return { ...hotkeyConfig }; },
-    },
-    getRoute, getTransitions, getPresetNames, getActivePresetName, getCurrentWaypoint,
-    createPreset, savePreset, loadPreset, deletePreset, exportPresets, importPresets,
-    addWaypoint, addWaypointCurrentSpot, addDelay, clearWaypoints, clearTransitions,
-    removeLastWaypoint, setCurrentIndex, goToWaypoint, goToPosition, handleFloorChange,
-    findClosestWaypointIndex, syncWaypointProgress, findRopeSource, findShovelSource,
-    inspectNearbyTiles: (radius = 1) => {
-      const position = normalizePosition(bot.getPlayerPosition());
-      if (!position) return [];
-      return getLoadedTiles()
-        .map((tile) => ({ tile, position: getTilePosition(tile) }))
-        .filter((entry) =>
-          entry.position &&
-          entry.position.z === position.z &&
-          Math.abs(entry.position.x - position.x) <= radius &&
-          Math.abs(entry.position.y - position.y) <= radius
-        )
-        .map((entry) => ({
-          position: entry.position,
-          isFloorChange: isFloorChangeTile(entry.tile),
-          isHole: isHoleTile(entry.tile),
-          isRopeTarget: isRopeTargetTile(entry.tile),
-          isShovelTarget: isShovelTargetTile(entry.tile),
-          names: getTileThings(entry.tile).map((thing) => getThingName(thing)).filter(Boolean),
-        }));
-    },
-    isAtWaypoint,
-  };
-};
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
-
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey  = "minibiaBot.ui.panelPosition";
   const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
@@ -8269,7 +8145,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autostack.config", "minibiaBot.autoringbycap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -8339,9 +8215,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoMagicShieldStatus() { const t=document.getElementById("minibia-bot-auto-magic-shield-enabled"); if(t) t.checked=!!bot.magicShield?.status?.().running; }
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
-  function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
-  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - haste:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
-  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"💍 equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo • cap ${cap} • ${anel} • ${origem}`; }
+  function refreshautostackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autostack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - speed:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
+  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoringbycap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
     if(t) t.checked=!!s?.running;
@@ -8551,7 +8427,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="mb-capring-enabled" /><span>Enable Auto Ring por Cap</span></label>
               <div class="mb-field-grid">
                 <div class="mb-field"><span class="mb-field-label">Tirar anel (cap &lt;)</span><input type="number" id="mb-capring-min" min="0" placeholder="200" /></div>
-                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap ≥)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
+                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap &ge;)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
                 <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-capring-cd" min="500" placeholder="1500" /></div>
               </div>
               <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
@@ -8563,7 +8439,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
               <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
               <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
-              <span class="mb-note">Detecta automatico pelo ID 17. Nao lanca com target na tela.</span>
+              <span class="mb-note">Detecta IDs 14 e 17. Nao lanca com target na tela.</span>
             </div>
           </div>
         </div>
@@ -8644,20 +8520,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <span class="mb-small-note" id="minibia-bot-cave-closest">Closest: no waypoints</span>
               <span class="mb-small-note" id="minibia-bot-cave-transition-status">Transitions: none</span>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-pause-until-clear" /><span>Pause Until Clear</span></label>
-              <!-- ── NOVOS CONTROLES: Strict Mode ──────────────────── -->
-              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-strict-mode" /><span>Strict Mode (inteligente)</span></label>
-              <div class="mb-row-three">
-                <span>Loop Type</span>
-                <select id="minibia-bot-cave-loop-type">
-                  <option value="reverse">Volta (reverse)</option>
-                  <option value="restart">Pula pro 1º (restart)</option>
-                </select>
-              </div>
-              <div class="mb-row-three">
-                <span>Max Proximity Skip</span>
-                <input type="number" id="minibia-bot-cave-max-proximity-skip" min="1" max="10" value="3" placeholder="3" style="width:60px" />
-              </div>
-              <!-- ───────────────────────────────────────────────────── -->
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-strict-order" /><span>Ordem Estrita (sem pular waypoints)</span></label>
               <div class="mb-row-three"><label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-pause-until-spawn" /><span>Pause Until Monster on Floor</span></label><span></span><input type="number" id="minibia-bot-cave-spawn-floor-offset" placeholder="+1" style="width:50px" /></div>
               <div class="mb-actions-inline-two"><button type="button" id="minibia-bot-cave-start">Start</button><button type="button" id="minibia-bot-cave-stop">Stop</button></div>
               <span class="mb-small-note" id="minibia-bot-cave-status">Status: no waypoints</span>
@@ -8784,7 +8647,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     switchTab(bot.storage.get(activeTabKey,"heal"));
 
     // Status bar
-    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autoStack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
+    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autostack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
     bot.addCleanup(()=>window.clearInterval(sbt));
 
     // ── Collapse ──────────────────────────────────────────────
@@ -8863,23 +8726,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const asTickI=panel.querySelector("#minibia-bot-auto-stack-tick");
     const asNowB=panel.querySelector("#minibia-bot-auto-stack-now");
     const asEnabledI=panel.querySelector("#minibia-bot-auto-stack-enabled");
-    if(asTickI){asTickI.value=String(bot.autoStack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autoStack?.updateConfig?.({tickMs:v});});}
-    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autoStack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
-    if(asEnabledI){asEnabledI.checked=!!bot.autoStack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autoStack?.start?.({tickMs:t});else bot.autoStack?.stop?.();refreshAutoStackStatus();});}
+    if(asTickI){asTickI.value=String(bot.autostack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autostack?.updateConfig?.({tickMs:v});});}
+    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autostack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
+    if(asEnabledI){asEnabledI.checked=!!bot.autostack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autostack?.start?.({tickMs:t});else bot.autostack?.stop?.();refreshautostackStatus();});}
 
-    // ── Auto Ring por Cap ─────────────────────────────────────
+    // ── Auto Ring por Cap ─────────────────────────────────────────────
     const capMinI=panel.querySelector("#mb-capring-min");
     const capPutI=panel.querySelector("#mb-capring-put");
     const capCdI=panel.querySelector("#mb-capring-cd");
     const capEnI=panel.querySelector("#mb-capring-enabled");
     const capClrB=panel.querySelector("#mb-capring-clear-origin");
-    if(capMinI){capMinI.value=String(bot.autoRingByCap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoRingByCap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
-    if(capPutI){capPutI.value=String(bot.autoRingByCap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoRingByCap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
-    if(capCdI){capCdI.value=String(bot.autoRingByCap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoRingByCap?.updateConfig?.({equipCooldownMs:v});});}
-    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
-    if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
+    if(capMinI){capMinI.value=String(bot.autoringbycap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoringbycap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
+    if(capPutI){capPutI.value=String(bot.autoringbycap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoringbycap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
+    if(capCdI){capCdI.value=String(bot.autoringbycap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoringbycap?.updateConfig?.({equipCooldownMs:v});});}
+    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoringbycap?.clearOrigin?.();refreshCapRingStatus();});}
+    if(capEnI){capEnI.checked=!!bot.autoringbycap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoringbycap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoringbycap?.stop?.();refreshCapRingStatus();});}
 
-    // ── Haste ────────────────────────────────────────────
+    // ── Haste ──────────────────────────────────────────────────
     const hasteSpellI=panel.querySelector("#mb-haste-spell");
     const hasteEnI=panel.querySelector("#mb-haste-enabled");
     if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
@@ -8968,14 +8831,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.querySelector("#minibia-bot-cave-remove-last")?.addEventListener("click",()=>{bot.cave.removeLastWaypoint();refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
     const cpucI=panel.querySelector("#minibia-bot-cave-pause-until-clear");
     if(cpucI){cpucI.checked=bot.cave?.config?.pauseUntilClear!==false;cpucI.addEventListener("change",()=>{bot.cave.updateConfig({pauseUntilClear:cpucI.checked});refreshCaveStatus();});}
-    // ── NOVOS CONTROLES: Strict Mode ──────────────────────────
-    const caveStrictModeI=panel.querySelector("#minibia-bot-cave-strict-mode");
-    if(caveStrictModeI){caveStrictModeI.checked=!!bot.cave?.config?.strictMode;caveStrictModeI.addEventListener("change",()=>{bot.cave.updateConfig({strictMode:caveStrictModeI.checked});refreshCaveStatus();});}
-    const caveLoopTypeI=panel.querySelector("#minibia-bot-cave-loop-type");
-    if(caveLoopTypeI){caveLoopTypeI.value=bot.cave?.config?.loopType||"reverse";caveLoopTypeI.addEventListener("change",()=>{bot.cave.updateConfig({loopType:caveLoopTypeI.value});refreshCaveStatus();});}
-    const caveMaxProximitySkipI=panel.querySelector("#minibia-bot-cave-max-proximity-skip");
-    if(caveMaxProximitySkipI){caveMaxProximitySkipI.value=String(bot.cave?.config?.maxProximitySkip??3);caveMaxProximitySkipI.addEventListener("change",()=>{const v=Math.max(1,Math.trunc(Number(caveMaxProximitySkipI.value)||3));caveMaxProximitySkipI.value=String(v);bot.cave.updateConfig({maxProximitySkip:v});refreshCaveStatus();});}
-    // ─────────────────────────────────────────────────────────
+    const caveStrictOrderI=panel.querySelector("#minibia-bot-cave-strict-order");
+    if(caveStrictOrderI){caveStrictOrderI.checked=!!bot.cave?.config?.strictOrder;caveStrictOrderI.addEventListener("change",()=>{bot.cave.updateConfig({strictOrder:caveStrictOrderI.checked});refreshCaveStatus();});}
     const csoI=panel.querySelector("#minibia-bot-cave-spawn-floor-offset");
     if(csoI){csoI.value=String(bot.cave?.config?.pauseUntilSpawnFloorOffset??1);csoI.addEventListener("change",()=>{const v=Math.trunc(Number(csoI.value)||0);csoI.value=String(v);bot.cave.updateConfig({pauseUntilSpawnFloorOffset:v});refreshCaveStatus();});}
     const cpusI=panel.querySelector("#minibia-bot-cave-pause-until-spawn");
@@ -9064,12 +8921,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -9081,12 +8938,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus, refreshHasteStatus,
+    refreshCaveTransitionStatus, refreshautostackStatus, refreshCapRingStatus, refreshHasteStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
   };
 };
+
 (() => {
   const bundle = window.__minibiaBotBundle || window.__minibiaBotReloadBundle || {};
   const persistedEnabledModules = [
@@ -9100,9 +8958,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["eat",           "minibiaBot.eat.config"],
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
-    ["autoStack",     "minibiaBot.autoStack.config"],
-    ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
-    ["haste",     "minibiaBot.haste.config"],
+    ["autostack",     "minibiaBot.autostack.config"],
+    ["autoringbycap", "minibiaBot.autoringbycap.config"],
+    ["haste",          "minibiaBot.haste.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
@@ -9152,8 +9010,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installAutoEatModule(bot);
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
-    currentBundle.installAutoStackModule(bot);
-    currentBundle.installAutoRingByCapModule(bot);
+    currentBundle.installautostackModule(bot);
+    currentBundle.installautoringbycapModule(bot);
     currentBundle.installastemodule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
@@ -9168,28 +9026,28 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     bot.stop   = (...args) => bot.rune.stop(...args);
     bot.reload = () => window.minibiaBotReload?.();
     bot.status = () => ({
-      version        : bot.version,
-      pz             : { home: bot.pz.getHomePz() },
-      xray           : bot.xray.status(),
-      panic          : bot.panic.status(),
-      rune           : bot.rune.status(),
-      heal           : bot.heal.status(),
-      invisible      : bot.invisible.status(),
-      magicShield    : bot.magicShield.status(),
-      attack         : bot.attack.status(),
-      cave           : bot.cave.status(),
-      equipRing      : bot.equipRing.status(),
-      eat            : bot.eat.status(),
-      talk           : bot.talk.status(),
-      follow         : bot.follow.status(),
-      autoStack      : bot.autoStack.status(),
-      autoRingByCap  : bot.autoRingByCap.status(),
-      haste      : bot.haste.status(),
-      friendHeal     : bot.friendHeal.status(),
-      autoSpell      : bot.autoSpell.status(),
-      distanceAttack : bot.distanceAttack.status(),
-      meleePosition  : bot.meleePosition.status(),
-      profiles       : bot.profiles.status(),
+      version:        bot.version,
+      pz:             { home: bot.pz.getHomePz() },
+      xray:           bot.xray.status(),
+      panic:          bot.panic.status(),
+      rune:           bot.rune.status(),
+      heal:           bot.heal.status(),
+      invisible:      bot.invisible.status(),
+      magicShield:    bot.magicShield.status(),
+      attack:         bot.attack.status(),
+      cave:           bot.cave.status(),
+      equipRing:      bot.equipRing.status(),
+      eat:            bot.eat.status(),
+      talk:           bot.talk.status(),
+      follow:         bot.follow.status(),
+      autostack:      bot.autostack.status(),
+      autoringbycap:  bot.autoringbycap.status(),
+      haste:          bot.haste.status(),
+      friendHeal:     bot.friendHeal.status(),
+      autoSpell:      bot.autoSpell.status(),
+      distanceAttack:  bot.distanceAttack.status(),
+      meleePosition:   bot.meleePosition.status(),
+      profiles:        bot.profiles.status(),
     });
 
     window.minibiaBot = bot;
