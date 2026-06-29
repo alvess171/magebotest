@@ -6696,9 +6696,9 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModule(bot) {
+window.__minibiaBotBundle.installautostackModule = function installautostackModule(bot) {
 
-  const configStorageKey = "minibiaBot.autoStack.config";
+  const configStorageKey = "minibiaBot.autostack.config";
 
   const config = Object.assign(
     {
@@ -6913,7 +6913,7 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
   if (config.enabled) start();
 
-  bot.autoStack = { start, stop, runOnce, status, updateConfig, config };
+  bot.autostack = { start, stop, runOnce, status, updateConfig, config };
 };
 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
@@ -7984,7 +7984,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoringbycap.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autostack.config", "minibiaBot.autoringbycap.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -8054,7 +8054,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoMagicShieldStatus() { const t=document.getElementById("minibia-bot-auto-magic-shield-enabled"); if(t) t.checked=!!bot.magicShield?.status?.().running; }
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
-  function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshautostackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autostack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
   function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoringbycap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
@@ -8477,7 +8477,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     switchTab(bot.storage.get(activeTabKey,"heal"));
 
     // Status bar
-    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autoStack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
+    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autostack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
     bot.addCleanup(()=>window.clearInterval(sbt));
 
     // ── Collapse ──────────────────────────────────────────────
@@ -8556,9 +8556,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const asTickI=panel.querySelector("#minibia-bot-auto-stack-tick");
     const asNowB=panel.querySelector("#minibia-bot-auto-stack-now");
     const asEnabledI=panel.querySelector("#minibia-bot-auto-stack-enabled");
-    if(asTickI){asTickI.value=String(bot.autoStack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autoStack?.updateConfig?.({tickMs:v});});}
-    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autoStack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
-    if(asEnabledI){asEnabledI.checked=!!bot.autoStack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autoStack?.start?.({tickMs:t});else bot.autoStack?.stop?.();refreshAutoStackStatus();});}
+    if(asTickI){asTickI.value=String(bot.autostack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autostack?.updateConfig?.({tickMs:v});});}
+    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autostack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
+    if(asEnabledI){asEnabledI.checked=!!bot.autostack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autostack?.start?.({tickMs:t});else bot.autostack?.stop?.();refreshautostackStatus();});}
 
     // ── Auto Ring por Cap ─────────────────────────────────────────────
     const capMinI=panel.querySelector("#mb-capring-min");
@@ -8745,12 +8745,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshautostackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
     refreshDistanceAttackStatus();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshautostackStatus();refreshCapRingStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -8762,7 +8762,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus,
+    refreshCaveTransitionStatus, refreshautostackStatus, refreshCapRingStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
@@ -8782,7 +8782,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["eat",           "minibiaBot.eat.config"],
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
-    ["autoStack",     "minibiaBot.autoStack.config"],
+    ["autostack",     "minibiaBot.autostack.config"],
     ["autoringbycap", "minibiaBot.autoringbycap.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
@@ -8833,7 +8833,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installAutoEatModule(bot);
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
-    currentBundle.installAutoStackModule(bot);
+    currentBundle.installautostackModule(bot);
     currentBundle.installautoringbycapModule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
@@ -8862,7 +8862,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       eat:            bot.eat.status(),
       talk:           bot.talk.status(),
       follow:         bot.follow.status(),
-      autoStack:      bot.autoStack.status(),
+      autostack:      bot.autostack.status(),
       autoringbycap:  bot.autoringbycap.status(),
       friendHeal:     bot.friendHeal.status(),
       autoSpell:      bot.autoSpell.status(),
