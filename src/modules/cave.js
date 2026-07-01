@@ -48,12 +48,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       waypointTolerance: 2,
       waypointLookahead: 12,
       pauseUntilClear: true,
-      pauseUntilSpawn: false,
+      pauseUntilSpawn: true,
       pauseUntilSpawnFloorOffset: 1,
       enabled: false,
       activePresetName: defaultPresetName,
-      proximitySkipEnabled: true, // pula gravação se já existe WP próximo
-     maxProximitySkip: 3,         // distância mínima (sqm Manhattan) entre WPs
+/
     },
     bot.storage.get(configStorageKey, {})
   );
