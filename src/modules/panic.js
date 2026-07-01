@@ -18,11 +18,11 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   const config = Object.assign(
     {
       tickMs: 200,
-      triggerCooldownMs: 4000,
+      triggerCooldownMs: 200,
       returnToOriginEnabled: false,
-      returnDelayMs: 45000,
-      returnDelayJitterMs: 45000,
-      returnRetryCooldownMs: 2000,
+      returnDelayMs: 4500,
+      returnDelayJitterMs: 4500,
+      returnRetryCooldownMs: 100,
       unknownPlayerEnabled: false,
       healthLossEnabled: false,
       trustedNames: [],
