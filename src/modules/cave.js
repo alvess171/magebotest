@@ -53,7 +53,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       enabled: false,
       activePresetName: defaultPresetName,
       proximitySkipEnabled: true, // pula gravação se já existe WP próximo
-      minProximitySkip: 3,         // distância mínima (sqm Manhattan) entre WPs
+     maxProximitySkip: 3,         // distância mínima (sqm Manhattan) entre WPs
     },
     bot.storage.get(configStorageKey, {})
   );
