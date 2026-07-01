@@ -43,7 +43,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   const config = Object.assign(
     {
       tickMs: 50,          // era 500 — 5x mais rápido
-      repathMs: 100,        // era 1500 — recalcula caminho bem mais rápido
+      repathMs: 50,        // era 1500 — recalcula caminho bem mais rápido
       observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
       waypointTolerance: 7,  //  Se você aumentar esse número, ele vai marcar como "chegado" mais cedo 
       waypointLookahead: 12,
