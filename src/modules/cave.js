@@ -45,14 +45,16 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       tickMs: 50,          // era 500 — 5x mais rápido
       repathMs: 50,        // era 1500 — recalcula caminho bem mais rápido
       observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
-      waypointTolerance: 7,  //  Se você aumentar esse número, ele vai marcar como "chegado" mais cedo 
+      waypointTolerance: 5,  //  Se você aumentar esse número, ele vai marcar como "chegado" mais cedo 
       waypointLookahead: 12,
       pauseUntilClear: true,
       pauseUntilSpawn: true,
+      strictOrder: false,   // true = ordem estrita sem pulos | false = lookahead (comportamento original)
       pauseUntilSpawnFloorOffset: 1,
+      proximitySkipEnabled: true, // pula gravação se já existe WP próximo
+      minProximitySkip: 3,         // distância mínima (sqm) entre WPs
       enabled: false,
       activePresetName: defaultPresetName,
-/
     },
     bot.storage.get(configStorageKey, {})
   );
@@ -495,18 +497,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const lookahead = getWaypointLookahead();
     let bestIndex = startIndex;
     let bestDistance = getDistanceToWaypoint(position, route[startIndex]);
-    if (direction > 0) {
-      const limit = Math.min(route.length - 1, startIndex + lookahead);
-      for (let index = startIndex + 1; index <= limit; index += 1) {
-        if (isDelayWaypoint(route[index])) continue;
-        const distance = getDistanceToWaypoint(position, route[index]);
-        if (!Number.isFinite(distance)) continue;
-        if (!Number.isFinite(bestDistance) || distance < bestDistance) { bestDistance = distance; bestIndex = index; }
-      }
-      return bestIndex;
-    }
-    const limit = Math.max(0, startIndex - lookahead);
-    for (let index = startIndex - 1; index >= limit; index -= 1) {
+    // Loop circular — sempre avança para frente
+    const limit = Math.min(route.length - 1, startIndex + lookahead);
+    for (let index = startIndex + 1; index <= limit; index += 1) {
       if (isDelayWaypoint(route[index])) continue;
       const distance = getDistanceToWaypoint(position, route[index]);
       if (!Number.isFinite(distance)) continue;
@@ -836,8 +829,18 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   function syncWaypointProgress(position) {
     if (!position || !route.length) return false;
     const previousIndex = state.currentIndex;
-    const direction = state.direction >= 0 ? 1 : -1;
-    if (direction > 0) {
+    const direction = 1; // sempre para frente (loop circular)
+
+    if (config.strictOrder) {
+      // ── Modo ordem estrita: avança um por um, sem pulos ──────
+      const waypoint = getCurrentWaypoint();
+      if (!isDelayWaypoint(waypoint) && isAtWaypoint(position, waypoint)) {
+        const nextIndex = state.currentIndex + 1;
+        state.currentIndex = nextIndex >= route.length ? 0 : nextIndex;
+        resetDelayState();
+      }
+    } else {
+      // ── Modo lookahead: comportamento original ────────────────
       let index = state.currentIndex;
       while (index < route.length) {
         const waypoint = route[index];
@@ -845,71 +848,35 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         index += 1;
       }
       if (index !== state.currentIndex) {
-        if (index >= route.length) { state.currentIndex = route.length - 1; state.direction = -1; }
-        else { state.currentIndex = index; }
+        state.currentIndex = index >= route.length ? 0 : index;
       }
-    } else {
-      let index = state.currentIndex;
-      while (index >= 0) {
-        const waypoint = route[index];
-        if (isDelayWaypoint(waypoint) || !isAtWaypoint(position, waypoint)) break;
-        index -= 1;
-      }
-      if (index !== state.currentIndex) {
-        if (index < 0) { state.currentIndex = 0; state.direction = 1; }
-        else { state.currentIndex = index; }
-      }
-    }
-    const currentWaypoint = getCurrentWaypoint();
-    const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
-    const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
-    if (!Number.isFinite(currentDistance)) {
-      if (previousIndex !== state.currentIndex) {
-        resetDelayState();
-        bot.log("cave synced waypoint progress", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, direction: state.direction, waypoint: getCurrentWaypoint() });
-        return true;
-      }
-      return false;
-    }
-    if (direction > 0 && aheadIndex > state.currentIndex) {
-      const aheadWaypoint = route[aheadIndex];
-      const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
-      if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
-        let nextIndex = findNextPositionIndex(aheadIndex, 1);
-        if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
-          const afterAhead = aheadIndex + 1;
-          if (afterAhead < route.length) nextIndex = findNextPositionIndex(afterAhead, 1);
-        } else {
-          const afterIndex = aheadIndex + 1;
-          if (afterIndex < route.length) {
-            const afterWaypoint = route[afterIndex];
-            const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
-            if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, 1);
+
+      const currentWaypoint = getCurrentWaypoint();
+      const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
+      const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
+      if (Number.isFinite(currentDistance) && aheadIndex > state.currentIndex) {
+        const aheadWaypoint = route[aheadIndex];
+        const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
+        if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
+          let nextIndex = findNextPositionIndex(aheadIndex, 1);
+          if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
+            const afterAhead = aheadIndex + 1;
+            if (afterAhead < route.length) nextIndex = findNextPositionIndex(afterAhead, 1);
+          } else {
+            const afterIndex = aheadIndex + 1;
+            if (afterIndex < route.length) {
+              const afterWaypoint = route[afterIndex];
+              const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
+              if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, 1);
+            }
           }
+          if (nextIndex > state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
         }
-        if (nextIndex > state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
-      }
-    } else if (direction < 0 && aheadIndex < state.currentIndex) {
-      const aheadWaypoint = route[aheadIndex];
-      const aheadDistance = getDistanceToWaypoint(position, aheadWaypoint);
-      if (Number.isFinite(aheadDistance) && aheadDistance < currentDistance) {
-        let nextIndex = findNextPositionIndex(aheadIndex, -1);
-        if (!isDelayWaypoint(aheadWaypoint) && isAtWaypoint(position, aheadWaypoint)) {
-          const afterAhead = aheadIndex - 1;
-          if (afterAhead >= 0) nextIndex = findNextPositionIndex(afterAhead, -1);
-        } else {
-          const afterIndex = aheadIndex - 1;
-          if (afterIndex >= 0) {
-            const afterWaypoint = route[afterIndex];
-            const afterDistance = getDistanceToWaypoint(position, afterWaypoint);
-            if (Number.isFinite(afterDistance) && afterDistance < aheadDistance) nextIndex = findNextPositionIndex(afterIndex, -1);
-          }
-        }
-        if (nextIndex < state.currentIndex) { state.currentIndex = nextIndex; resetDelayState(); }
       }
     }
+
     if (previousIndex !== state.currentIndex) {
-      bot.log("cave synced waypoint progress", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, direction: state.direction, aheadWaypoint: aheadIndex + 1, waypoint: getCurrentWaypoint() });
+      bot.log("cave synced waypoint", { from: previousIndex + 1, to: state.currentIndex + 1, total: route.length, strictOrder: config.strictOrder });
       return true;
     }
     return false;
@@ -1117,13 +1084,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   function advanceWaypoint() {
     if (!route.length) return null;
     if (route.length === 1) return route[0];
-    let nextIndex = state.currentIndex + state.direction;
-    if (nextIndex >= route.length) { state.direction = -1; nextIndex = route.length - 2; }
-    else if (nextIndex < 0) { state.direction = 1; nextIndex = 1; }
-    state.currentIndex = Math.max(0, Math.min(route.length - 1, nextIndex));
+    // Loop circular: quando chega no último volta para o primeiro
+    let nextIndex = state.currentIndex + 1;
+    if (nextIndex >= route.length) { nextIndex = 0; }
+    state.currentIndex = nextIndex;
+    state.direction = 1; // sempre para frente
     const nextWaypoint = getCurrentWaypoint();
     resetDelayState();
-    bot.log("cave advanced waypoint", { index: state.currentIndex + 1, total: route.length, direction: state.direction, waypoint: nextWaypoint });
+    bot.log("cave advanced waypoint", { index: state.currentIndex + 1, total: route.length, waypoint: nextWaypoint });
     return nextWaypoint;
   }
 
@@ -1222,8 +1190,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const position = normalizePosition(bot.getPlayerPosition());
     state.running = true;
     state.currentIndex = findClosestWaypointIndex(position);
-    state.direction = state.currentIndex >= route.length - 1 ? -1 : 1;
-    if (route.length <= 1) state.direction = 1;
+    state.direction = 1; // sempre loop circular para frente
     state.lastPathAt = 0;
     state.lastPositionKey = getPositionKey(position);
     state.lastProgressAt = Date.now();
@@ -1329,8 +1296,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const nextIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(index) || 0)));
     state.currentIndex = nextIndex;
     resetDelayState();
-    state.direction = nextIndex >= route.length - 1 ? -1 : 1;
-    if (route.length <= 1) state.direction = 1;
+    state.direction = 1; // sempre loop circular
     return state.currentIndex;
   }
 
@@ -1366,11 +1332,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("waypointTolerance" in nextConfig) nextConfig.waypointTolerance = Math.max(0, Math.trunc(Number(nextConfig.waypointTolerance) || 0));
     if ("waypointLookahead" in nextConfig) nextConfig.waypointLookahead = Math.max(1, Math.trunc(Number(nextConfig.waypointLookahead) || 12));
     // ── VELOCIDADE: valida tickMs e repathMs sem forçar 500 ─
-    if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 50));
-    if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 50));
+    if ("tickMs"     in nextConfig) nextConfig.tickMs     = Math.max(50, Math.trunc(Number(nextConfig.tickMs)     || 100));
+    if ("repathMs"   in nextConfig) nextConfig.repathMs   = Math.max(100, Math.trunc(Number(nextConfig.repathMs)  || 400));
     if ("observerMs" in nextConfig) nextConfig.observerMs = Math.max(50, Math.trunc(Number(nextConfig.observerMs) || 50));
     if ("minProximitySkip" in nextConfig) nextConfig.minProximitySkip = Math.max(1, Math.min(20, Math.trunc(Number(nextConfig.minProximitySkip) || 3)));
     if ("proximitySkipEnabled" in nextConfig) nextConfig.proximitySkipEnabled = !!nextConfig.proximitySkipEnabled;
+    if ("strictOrder" in nextConfig) nextConfig.strictOrder = !!nextConfig.strictOrder;
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
