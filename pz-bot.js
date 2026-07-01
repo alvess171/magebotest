@@ -3768,12 +3768,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   const config = Object.assign(
     {
       tickMs: 50,           // tick ultra rápido
-      repathMs: 200,        // recalcula caminho bem mais rápido
+      repathMs: 50,        // recalcula caminho bem mais rápido
       observerMs: 50,       // detecta mudança de posição bem mais rápido
-      waypointTolerance: 1, // considera chegou com 1 tile de tolerância (mais preciso e rápido)
+      waypointTolerance: 7, // considera chegou com 1 tile de tolerância (mais preciso e rápido)
       waypointLookahead: 12,
       pauseUntilClear: true,
-      pauseUntilSpawn: false,
+      pauseUntilSpawn: true,
       strictOrder: false,   // true = ordem estrita sem pulos | false = lookahead (comportamento original)
       pauseUntilSpawnFloorOffset: 1,
       enabled: false,
