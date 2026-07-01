@@ -8300,7 +8300,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
   function enableDrag(panel, key=panelPositionKey) {
-    const handle=panel.querySelector(".mb-title"); if(!handle) return;
+    const handle=panel.querySelector(".mb-titlebar"); if(!handle) return;
     let drag=null;
     const onMove=(e)=>{ if(!drag) return; const maxL=Math.max(0,window.innerWidth-panel.offsetWidth),maxT=Math.max(0,window.innerHeight-panel.offsetHeight); panel.style.left=`${Math.min(Math.max(0,e.clientX-drag.ox),maxL)}px`; panel.style.top=`${Math.min(Math.max(0,e.clientY-drag.oy),maxT)}px`; panel.style.right="auto"; };
     const onUp=()=>{ if(!drag) return; drag=null; const r=panel.getBoundingClientRect(); savePanelPosition({left:r.left,top:r.top},key); };
@@ -8368,6 +8368,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-accordion-header{display:none}
       #minibia-bot-panel .mb-accordion-body{display:block!important}
       #minibia-bot-panel .mb-accordion-body[hidden]{display:none!important}
+      #minibia-bot-panel[data-collapsed="true"]{width:26px;min-width:26px}
+      #minibia-bot-panel[data-collapsed="true"] .mb-tabs,
+      #minibia-bot-panel[data-collapsed="true"] .mb-statusbar{display:none}
+      #minibia-bot-panel[data-collapsed="true"] .mb-titlebar{padding:2px;justify-content:center}
+      #minibia-bot-panel[data-collapsed="true"] .mb-title{display:none}
     `;
     document.head.appendChild(style);
 
