@@ -5206,6 +5206,54 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   if (config.enabled && route.length) start();
 
+  // ── VIGIA DE RECONEXÃO (interno ao módulo cave) ─────────────
+  // Toda vez que a conexão cair e voltar, ativa o cave bot de novo
+  // (sempre, desde que já exista uma rota salva).
+  const reconnectWatcherStateCave = {
+    estavaConectado: null,
+    timerId: null,
+  };
+
+  function estaConectadoCave() {
+    return !!window.gameClient?.networkManager?.state?.__wasConnected;
+  }
+
+  function verificarReconexaoCave() {
+    const conectadoAgora = estaConectadoCave();
+
+    if (reconnectWatcherStateCave.estavaConectado === null) {
+      reconnectWatcherStateCave.estavaConectado = conectadoAgora;
+      return;
+    }
+
+    if (!reconnectWatcherStateCave.estavaConectado && conectadoAgora) {
+      bot.log("cave reconnect detected");
+      window.setTimeout(() => {
+        if (route.length) {
+          const iniciou = start();
+          bot.log("cave bot ativado após reconexão", { sucesso: iniciou });
+        }
+      }, 2000);
+    }
+
+    reconnectWatcherStateCave.estavaConectado = conectadoAgora;
+  }
+
+  function startReconnectWatcherCave() {
+    if (reconnectWatcherStateCave.timerId != null) return;
+    reconnectWatcherStateCave.timerId = window.setInterval(verificarReconexaoCave, 1000);
+  }
+
+  function stopReconnectWatcherCave() {
+    if (reconnectWatcherStateCave.timerId != null) {
+      window.clearInterval(reconnectWatcherStateCave.timerId);
+      reconnectWatcherStateCave.timerId = null;
+    }
+  }
+
+  startReconnectWatcherCave();
+  bot.addCleanup(stopReconnectWatcherCave);
+
   bot.cave = {
     start, stop, status, updateConfig, config,
     hotkey: {
@@ -9634,68 +9682,5 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   } else {
     console.error("[Chat] window.gameClient não encontrado. O jogo já carregou completamente?");
   }
-
-})();
-
-
-// ===== REATIVADOR AUTOMÁTICO DE MÓDULOS APÓS RECONEXÃO (CAVE + PANIC) =====
-// ============================================================
-// Minibia — Reativador automático de módulos após reconexão
-// ============================================================
-// Fica de olho no status da conexão com o servidor. Quando detecta
-// que caiu e depois voltou, reativa o cave bot automaticamente.
-// (O panic runner agora tem seu próprio vigia de reconexão embutido
-// no módulo, então não precisa ser cuidado aqui também.)
-// ============================================================
-
-(function () {
-
-  const INTERVALO_MS = 1000;       // com que frequência verificar a conexão
-  const ESPERA_APOS_RECONECTAR = 2000; // espera antes de reativar (dá tempo do jogo estabilizar)
-
-  let estavaConectado = null; // null = ainda não sabemos o estado inicial
-
-  function estaConectado() {
-    // __wasConnected reflete se a última verificação de rede teve sucesso.
-    return !!window.gameClient?.networkManager?.state?.__wasConnected;
-  }
-
-  function verificarConexao() {
-    const conectadoAgora = estaConectado();
-
-    if (estavaConectado === null) {
-      // primeira verificação, só guarda o estado, não faz nada ainda
-      estavaConectado = conectadoAgora;
-      return;
-    }
-
-    // Detectou queda de conexão
-    if (estavaConectado && !conectadoAgora) {
-      console.log("%c[Cave-Auto] Conexão caiu.", "color: orange;");
-    }
-
-    // Detectou volta da conexão
-    if (!estavaConectado && conectadoAgora) {
-      console.log("%c[Cave-Auto] Conexão voltou.", "color: lightgreen;");
-
-      setTimeout(function () {
-        // Sempre tenta ativar o cave bot após reconectar, independente
-        // de estar rodando antes de cair.
-        const caveJaRodando = window.minibiaBot?.cave?.status?.().running;
-        if (!caveJaRodando && window.minibiaBot?.cave?.start) {
-          const iniciou = window.minibiaBot.cave.start();
-          console.log(
-            "%c[Cave-Auto] Cave bot ativado após reconexão: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
-            "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
-          );
-        }
-      }, ESPERA_APOS_RECONECTAR);
-    }
-
-    estavaConectado = conectadoAgora;
-  }
-
-  setInterval(verificarConexao, INTERVALO_MS);
-  console.log("[Cave-Auto] Vigia de reconexão ativo.");
 
 })();
