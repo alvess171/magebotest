@@ -9654,7 +9654,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const ESPERA_APOS_RECONECTAR = 2000; // espera antes de reativar (dá tempo do jogo estabilizar)
 
   let estavaConectado = null; // null = ainda não sabemos o estado inicial
-  let caveEstavaAtivoAntesDeCair = false;
 
   function estaConectado() {
     // __wasConnected reflete se a última verificação de rede teve sucesso.
@@ -9672,11 +9671,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     // Detectou queda de conexão
     if (estavaConectado && !conectadoAgora) {
-      caveEstavaAtivoAntesDeCair = !!window.minibiaBot?.cave?.status?.().running;
-      console.log(
-        "%c[Cave-Auto] Conexão caiu. Cave ativo: " + caveEstavaAtivoAntesDeCair,
-        "color: orange;"
-      );
+      console.log("%c[Cave-Auto] Conexão caiu.", "color: orange;");
     }
 
     // Detectou volta da conexão
@@ -9684,16 +9679,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       console.log("%c[Cave-Auto] Conexão voltou.", "color: lightgreen;");
 
       setTimeout(function () {
-        // Reativa o cave bot, se estava ativo antes de cair
-        if (caveEstavaAtivoAntesDeCair) {
-          const caveJaRodando = window.minibiaBot?.cave?.status?.().running;
-          if (!caveJaRodando && window.minibiaBot?.cave?.start) {
-            const iniciou = window.minibiaBot.cave.start();
-            console.log(
-              "%c[Cave-Auto] Cave bot reativado: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
-              "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
-            );
-          }
+        // Sempre tenta ativar o cave bot após reconectar, independente
+        // de estar rodando antes de cair.
+        const caveJaRodando = window.minibiaBot?.cave?.status?.().running;
+        if (!caveJaRodando && window.minibiaBot?.cave?.start) {
+          const iniciou = window.minibiaBot.cave.start();
+          console.log(
+            "%c[Cave-Auto] Cave bot ativado após reconexão: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
+            "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
+          );
         }
       }, ESPERA_APOS_RECONECTAR);
     }
