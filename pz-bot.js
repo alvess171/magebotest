@@ -9092,3 +9092,215 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   delete window.__minibiaBotBundle;
   boot(bundle);
 })();
+// ============================================================
+// Minibia — Detector de Mensagens de Chat
+// ============================================================
+// Detecta mensagens novas no chat e toca um alarme sonoro.
+// Detecta seu nome de personagem automaticamente (suas próprias
+// mensagens aparecem em amarelo no chat).
+//
+// Como usar: cole isso no console (F12) enquanto estiver no jogo.
+// ============================================================
+
+(function () {
+
+  // ---------- CONFIGURAÇÃO ----------
+
+  const VOLUME = 0.3;                        // volume do alarme (0 a 1)
+  const TOM_HZ = 880;                        // tom do alarme
+  const QTD_BIPS = 3;                        // quantos bips por menção
+
+  // Cor usada pelo jogo pras SUAS próprias mensagens (amarelo).
+  // Se não bater no seu jogo, ajuste esse valor.
+  const COR_PROPRIA = "rgb(255, 255, 0)";
+
+  // Quando tocar o alarme:
+  //   "mencao"   -> só quando alguém (que não seja você) mencionar seu nome
+  //   "qualquer" -> em qualquer mensagem nova de qualquer pessoa
+  const ALARME_EM = "qualquer";
+
+  // Mensagens que contenham qualquer um desses textos são totalmente
+  // ignoradas (não aparecem no console, não tocam alarme).
+  const IGNORAR_SE_CONTIVER = [
+    "hitpoints",
+    "attack"
+  ];
+
+  // Abas de chat que só renderizam mensagem quando estão "ativas".
+  // O script alterna rapidinho pra essa aba e volta, de tempos em
+  // tempos, pra forçar o jogo a desenhar as mensagens novas.
+  const ABAS_FORCAR_ATUALIZACAO = ["Console"];
+  const INTERVALO_FORCAR_MS = 5000; // a cada quantos ms verificar
+
+
+  // ---------- NOME DO JOGADOR (detectado automaticamente) ----------
+
+  let playerName = null;
+  let emTrocaForcada = false; // true só durante a troca automática de aba
+
+  function tentarDetectarNome(spanElement) {
+    if (playerName) return; // já detectado, não precisa de novo
+
+    const cor = spanElement.style.color;
+    if (cor === COR_PROPRIA) {
+      playerName = spanElement.getAttribute("name");
+      console.log("%c[Chat] Nome do jogador detectado: " + playerName, "color: lightgreen;");
+    }
+  }
+
+
+  // ---------- ALARME SONORO ----------
+
+  function tocarAlarme() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+
+      for (let i = 0; i < QTD_BIPS; i++) {
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+
+        oscillator.type = "square";
+        oscillator.frequency.value = TOM_HZ;
+        gain.gain.value = VOLUME;
+
+        const inicio = ctx.currentTime + i * 0.3;
+        oscillator.start(inicio);
+        oscillator.stop(inicio + 0.2);
+      }
+    } catch (erro) {
+      console.error("[Chat] Erro ao tocar alarme:", erro.message);
+    }
+  }
+
+
+  // ---------- PROCESSAMENTO DE CADA MENSAGEM ----------
+
+  function deveIgnorar(mensagem) {
+    const texto = mensagem.toLowerCase();
+    return IGNORAR_SE_CONTIVER.some(function (padrao) {
+      return texto.includes(padrao.toLowerCase());
+    });
+  }
+
+  function processarMensagem(spanElement, ehHistorico) {
+    tentarDetectarNome(spanElement);
+
+    const remetente = spanElement.getAttribute("name") || "Desconhecido";
+    const mensagem = spanElement.getAttribute("data-message") || spanElement.textContent.trim();
+
+    if (deveIgnorar(mensagem)) {
+      spanElement.style.display = "none"; // esconde da tela do jogo também
+      return;
+    }
+
+    const souEu = playerName ? remetente.toLowerCase() === playerName.toLowerCase() : false;
+    const fuiMencionado = playerName && !souEu && mensagem.toLowerCase().includes(playerName.toLowerCase());
+
+    const deveAlarmar =
+      !ehHistorico && !emTrocaForcada && (
+        ALARME_EM === "qualquer" ? !souEu :
+        ALARME_EM === "mencao" ? fuiMencionado :
+        false
+      );
+
+    if (fuiMencionado) {
+      console.log(
+        "%c[MENÇÃO] " + remetente + ": " + mensagem,
+        "color: orange; font-weight: bold;"
+      );
+    } else {
+      console.log("[" + remetente + "] " + mensagem);
+    }
+
+    if (deveAlarmar) {
+      tocarAlarme();
+    }
+  }
+
+
+  // ---------- FORÇAR ATUALIZAÇÃO DE ABAS "PREGUIÇOSAS" ----------
+
+  function encontrarAba(nome) {
+    const abas = document.querySelectorAll(".chat-title");
+    for (const aba of abas) {
+      if (aba.textContent.trim() === nome) return aba;
+    }
+    return null;
+  }
+
+  function forcarAtualizacaoAbas() {
+    // Descobre qual aba está ativa agora, pra voltar pra ela depois.
+    const abaAtivaAntes = document.querySelector(".chat-title.selected");
+    const nomeAbaAtivaAntes = abaAtivaAntes ? abaAtivaAntes.textContent.trim() : null;
+
+    emTrocaForcada = true; // mensagens detectadas a partir daqui não alarmam
+
+    ABAS_FORCAR_ATUALIZACAO.forEach(function (nomeAba) {
+      const aba = encontrarAba(nomeAba);
+      if (aba) aba.click();
+    });
+
+    // Espera um instante (dá tempo do jogo renderizar as mensagens
+    // pendentes) e depois volta pra aba que estava ativa antes.
+    setTimeout(function () {
+      if (nomeAbaAtivaAntes) {
+        const abaOriginal = encontrarAba(nomeAbaAtivaAntes);
+        if (abaOriginal) abaOriginal.click();
+      }
+
+      // Espera mais um pouco (pra cobrir a re-renderização causada
+      // pela volta da aba) antes de liberar o alarme normal de novo.
+      setTimeout(function () {
+        emTrocaForcada = false;
+      }, 300);
+    }, 300);
+  }
+
+
+  // ---------- INICIALIZAÇÃO ----------
+
+  function iniciar() {
+    // Tenta detectar o nome já a partir de mensagens que já estavam
+    // na tela antes do script iniciar.
+    document.querySelectorAll(".chat-message").forEach(tentarDetectarNome);
+
+    // Aplica o mesmo filtro (esconder "hitpoints"/"attack", etc) nas
+    // mensagens que já estavam na tela antes do script iniciar —
+    // sem disparar alarme pra elas (só faz sentido pra mensagens novas).
+    document.querySelectorAll(".chat-message").forEach(function (span) {
+      processarMensagem(span, true);
+    });
+
+    // Observa a página inteira (não só a aba de chat visível no momento).
+    // Isso garante que mensagens em OUTRAS abas (ex: privado com outro
+    // jogador) sejam detectadas mesmo sem clicar na aba pra abrir ela.
+    const observer = new MutationObserver(function (mutations) {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType === 1 && node.classList && node.classList.contains("chat-message")) {
+            processarMensagem(node);
+          }
+        }
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Alterna periodicamente pras abas "preguiçosas" (que só renderizam
+    // quando ativas), pra garantir que o detector também as capture.
+    if (ABAS_FORCAR_ATUALIZACAO.length > 0) {
+      setInterval(forcarAtualizacaoAbas, INTERVALO_FORCAR_MS);
+    }
+
+    console.log("[Chat] Detector ativo (observando todas as abas). Aguardando mensagens...");
+    if (!playerName) {
+      console.log("[Chat] Nome do jogador ainda não detectado — mande uma mensagem no chat pra eu identificar.");
+    }
+  }
+
+  iniciar();
+
+})();
