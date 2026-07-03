@@ -191,14 +191,37 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(typeof p.left==="number"){panel.style.left=`${p.left}px`;panel.style.right="auto";}
   }
 
+  function centerPanel(panel) {
+    const left = Math.max(0, (window.innerWidth - panel.offsetWidth) / 2);
+    const top = Math.max(0, (window.innerHeight - panel.offsetHeight) / 2);
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = "auto";
+  }
+
   function enableDrag(panel, key=panelPositionKey) {
     const handle=panel.querySelector(".mb-titlebar"); if(!handle) return;
     let drag=null;
-    const onMove=(e)=>{ if(!drag) return; const maxL=Math.max(0,window.innerWidth-panel.offsetWidth),maxT=Math.max(0,window.innerHeight-panel.offsetHeight); panel.style.left=`${Math.min(Math.max(0,e.clientX-drag.ox),maxL)}px`; panel.style.top=`${Math.min(Math.max(0,e.clientY-drag.oy),maxT)}px`; panel.style.right="auto"; };
-    const onUp=()=>{ if(!drag) return; drag=null; const r=panel.getBoundingClientRect(); savePanelPosition({left:r.left,top:r.top},key); };
-    handle.addEventListener("mousedown",(e)=>{ if(e.button!==0) return; const r=panel.getBoundingClientRect(); drag={ox:e.clientX-r.left,oy:e.clientY-r.top}; e.preventDefault(); });
-    window.addEventListener("mousemove",onMove); window.addEventListener("mouseup",onUp);
-    bot.addCleanup(()=>{ window.removeEventListener("mousemove",onMove); window.removeEventListener("mouseup",onUp); });
+    const startDrag=(clientX,clientY)=>{ const r=panel.getBoundingClientRect(); drag={ox:clientX-r.left,oy:clientY-r.top}; };
+    const onMove=(clientX,clientY)=>{ if(!drag) return; const maxL=Math.max(0,window.innerWidth-panel.offsetWidth),maxT=Math.max(0,window.innerHeight-panel.offsetHeight); panel.style.left=`${Math.min(Math.max(0,clientX-drag.ox),maxL)}px`; panel.style.top=`${Math.min(Math.max(0,clientY-drag.oy),maxT)}px`; panel.style.right="auto"; };
+    const endDrag=()=>{ if(!drag) return; drag=null; const r=panel.getBoundingClientRect(); savePanelPosition({left:r.left,top:r.top},key); };
+
+    // Mouse (PC)
+    const onMouseMove=(e)=>onMove(e.clientX,e.clientY);
+    handle.addEventListener("mousedown",(e)=>{ if(e.button!==0) return; startDrag(e.clientX,e.clientY); e.preventDefault(); });
+    window.addEventListener("mousemove",onMouseMove); window.addEventListener("mouseup",endDrag);
+
+    // Touch (celular)
+    handle.style.touchAction="none";
+    const onTouchMove=(e)=>{ const t=e.touches[0]; if(!t) return; onMove(t.clientX,t.clientY); };
+    handle.addEventListener("touchstart",(e)=>{ const t=e.touches[0]; if(!t) return; startDrag(t.clientX,t.clientY); }, {passive:true});
+    window.addEventListener("touchmove",onTouchMove, {passive:true});
+    window.addEventListener("touchend",endDrag);
+
+    bot.addCleanup(()=>{
+      window.removeEventListener("mousemove",onMouseMove); window.removeEventListener("mouseup",endDrag);
+      window.removeEventListener("touchmove",onTouchMove); window.removeEventListener("touchend",endDrag);
+    });
   }
 
   function inject() {
@@ -206,53 +229,55 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     const style=document.createElement("style"); style.id="minibia-bot-style";
     style.textContent=`
-      #minibia-bot-panel{position:fixed;top:10px;right:10px;z-index:999999;width:460px;max-width:calc(100vw - 20px);background:#d4d0c8;border:2px solid;border-color:#ffffff #808080 #808080 #ffffff;font:13px/1.4 Segoe UI,Arial,sans-serif;color:#000;user-select:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;font-weight:normal}
+      #minibia-bot-panel{position:fixed;top:10px;right:10px;z-index:999999;width:460px;max-width:calc(100vw - 20px);background:#181b22;border:1px solid #262a33;border-radius:14px;font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#e6e6e6;user-select:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;font-weight:normal;box-shadow:0 8px 30px rgba(0,0,0,0.55);overflow:hidden}
       #minibia-bot-panel *{box-sizing:border-box}
-      #minibia-bot-panel .mb-titlebar{background:linear-gradient(to right,#0a246a 0%,#a6caf0 100%);color:#fff;font-size:13px;padding:3px 4px 3px 6px;display:flex;align-items:center;justify-content:space-between;gap:4px;cursor:move}
+      #minibia-bot-panel .mb-titlebar{background:linear-gradient(135deg,#4c7cf0 0%,#2c4fc7 100%);color:#fff;font-size:13px;font-weight:600;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:4px;cursor:move}
       #minibia-bot-panel .mb-title{flex:1;white-space:nowrap}
-      #minibia-bot-panel .mb-titlebar-btns{display:flex;gap:2px}
-      #minibia-bot-panel .mb-icon-button{width:16px;height:14px;min-width:16px;padding:0;background:#d4d0c8;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff;color:#000;font:normal 11px Segoe UI,Arial,sans-serif;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
-      #minibia-bot-panel .mb-icon-button:active{border-color:#808080 #ffffff #ffffff #808080}
-      #minibia-bot-panel .mb-tabs{display:flex;flex-wrap:wrap;padding:3px 4px 0;gap:2px;background:#d4d0c8;border-bottom:1px solid #808080}
-      #minibia-bot-panel .mb-tab{padding:2px 8px 3px;border:1px solid;border-color:#ffffff #808080 #d4d0c8 #ffffff;background:#bbb8b0;font:13px Segoe UI,Arial,sans-serif;cursor:pointer;border-bottom:none;position:relative;top:1px;color:#000;white-space:nowrap}
-      #minibia-bot-panel .mb-tab.mb-tab-active{background:#d4d0c8;z-index:2;padding-bottom:4px}
-      #minibia-bot-panel .mb-tab:hover:not(.mb-tab-active){background:#c8c5be}
+      #minibia-bot-panel .mb-titlebar-btns{display:flex;gap:4px}
+      #minibia-bot-panel .mb-icon-button{width:22px;height:22px;min-width:22px;padding:0;background:rgba(255,255,255,0.15);border:none;border-radius:6px;color:#fff;font:normal 13px inherit;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+      #minibia-bot-panel .mb-icon-button:hover{background:rgba(255,255,255,0.28)}
+      #minibia-bot-panel .mb-icon-button:active{background:rgba(255,255,255,0.4)}
+      #minibia-bot-panel .mb-tabs{display:flex;flex-wrap:wrap;padding:8px 8px 0;gap:4px;background:#181b22;border-bottom:1px solid #262a33}
+      #minibia-bot-panel .mb-tab{padding:6px 12px;border:none;border-radius:8px 8px 0 0;background:transparent;font:13px inherit;cursor:pointer;position:relative;color:#8a8f98;white-space:nowrap;transition:background .15s,color .15s}
+      #minibia-bot-panel .mb-tab.mb-tab-active{background:#22262f;color:#e6e6e6;font-weight:600}
+      #minibia-bot-panel .mb-tab:hover:not(.mb-tab-active){background:#1c2028;color:#c7cbd1}
       #minibia-bot-panel .mb-tab-content{display:none}
       #minibia-bot-panel .mb-tab-content.mb-tab-active{display:block}
-      #minibia-bot-panel .mb-body{padding:6px;max-height:min(70vh,520px);overflow-y:auto;scrollbar-width:thin;background:#d4d0c8}
-      #minibia-bot-panel .mb-group{border:1px solid #808080;border-top:none;padding:10px 8px 8px;position:relative;margin-top:10px;background:#d4d0c8}
-      #minibia-bot-panel .mb-group-title{position:absolute;top:-7px;left:8px;background:#d4d0c8;padding:0 3px;font-size:13px}
-      #minibia-bot-panel .mb-stack{display:flex;flex-direction:column;gap:5px}
-      #minibia-bot-panel .mb-row{display:flex;align-items:center;gap:6px}
-      #minibia-bot-panel .mb-toggle{display:flex;align-items:center;gap:5px;font-size:13px;color:#000;cursor:pointer}
-      #minibia-bot-panel .mb-toggle input[type="checkbox"]{width:13px;height:13px;margin:0;cursor:pointer}
-      #minibia-bot-panel button{height:21px;min-width:60px;padding:0 8px;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff;background:#d4d0c8;font:13px Segoe UI,Arial,sans-serif;cursor:pointer;color:#000;white-space:nowrap}
-      #minibia-bot-panel button:hover{background:#e0ddd5}
-      #minibia-bot-panel button:active{border-color:#808080 #ffffff #ffffff #808080}
-      #minibia-bot-panel button:disabled{color:#808080;cursor:default}
+      #minibia-bot-panel .mb-body{padding:12px;max-height:min(70vh,520px);overflow-y:auto;scrollbar-width:thin;background:#181b22}
+      #minibia-bot-panel .mb-group{border:1px solid #262a33;border-radius:10px;padding:14px 10px 10px;position:relative;margin-top:14px;background:#1c2028}
+      #minibia-bot-panel .mb-group-title{position:absolute;top:-9px;left:10px;background:#181b22;padding:0 6px;font-size:12px;color:#8a8f98;font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+      #minibia-bot-panel .mb-stack{display:flex;flex-direction:column;gap:8px}
+      #minibia-bot-panel .mb-row{display:flex;align-items:center;gap:8px}
+      #minibia-bot-panel .mb-toggle{display:flex;align-items:center;gap:7px;font-size:13px;color:#e6e6e6;cursor:pointer}
+      #minibia-bot-panel .mb-toggle input[type="checkbox"]{width:15px;height:15px;margin:0;cursor:pointer;accent-color:#4c7cf0}
+      #minibia-bot-panel button{height:28px;min-width:64px;padding:0 12px;border:none;border-radius:8px;background:#2c313c;font:13px inherit;cursor:pointer;color:#e6e6e6;white-space:nowrap;transition:background .15s}
+      #minibia-bot-panel button:hover{background:#363c48}
+      #minibia-bot-panel button:active{background:#4c7cf0;color:#fff}
+      #minibia-bot-panel button:disabled{color:#565b64;cursor:default;background:#20242c}
       #minibia-bot-panel button.mb-btn-full{width:100%}
-      #minibia-bot-panel .mb-small-button{height:18px;min-width:40px;padding:0 6px;font-size:13px}
-      #minibia-bot-panel input:not([type="checkbox"]),#minibia-bot-panel select,#minibia-bot-panel textarea{height:19px;border:1px solid;border-color:#808080 #ffffff #ffffff #808080;background:#fff;padding:0 3px;font:13px Segoe UI,Arial,sans-serif;color:#000;width:100%}
-      #minibia-bot-panel textarea{height:auto;min-height:48px;padding:3px;resize:vertical}
+      #minibia-bot-panel .mb-small-button{height:22px;min-width:44px;padding:0 8px;font-size:12px;border-radius:6px}
+      #minibia-bot-panel input:not([type="checkbox"]),#minibia-bot-panel select,#minibia-bot-panel textarea{height:26px;border:1px solid #2c313c;border-radius:6px;background:#10131a;padding:0 8px;font:13px inherit;color:#e6e6e6;width:100%}
+      #minibia-bot-panel input:not([type="checkbox"]):focus,#minibia-bot-panel select:focus,#minibia-bot-panel textarea:focus{outline:none;border-color:#4c7cf0}
+      #minibia-bot-panel textarea{height:auto;min-height:48px;padding:6px 8px;resize:vertical}
       #minibia-bot-panel input[type="number"]{width:60px}
-      #minibia-bot-panel .mb-inline{display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center}
-      #minibia-bot-panel .mb-field{display:flex;flex-direction:column;gap:2px}
-      #minibia-bot-panel .mb-field-label{font-size:13px;color:#000}
+      #minibia-bot-panel .mb-inline{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center}
+      #minibia-bot-panel .mb-field{display:flex;flex-direction:column;gap:4px}
+      #minibia-bot-panel .mb-field-label{font-size:12px;color:#8a8f98}
       #minibia-bot-panel .mb-field input{width:100%}
-      #minibia-bot-panel .mb-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
-      #minibia-bot-panel .mb-small-note{font-size:13px;color:#444}
-      #minibia-bot-panel .mb-label{font-size:13px;color:#000}
-      #minibia-bot-panel .mb-note{font-size:12px;color:#666;margin-top:4px}
-      #minibia-bot-panel .mb-list{display:flex;flex-direction:column;gap:3px}
-      #minibia-bot-panel .mb-list-row{display:grid;grid-template-columns:1fr auto;gap:4px;align-items:center;border-bottom:1px solid #c0bdb5;padding-bottom:3px}
-      #minibia-bot-panel .mb-creature-row{border-bottom:1px solid #c0bdb5;padding:2px 0;font-size:13px}
-      #minibia-bot-panel .mb-creature-name{font-weight:normal}
-      #minibia-bot-panel .mb-floor-label{font-size:13px;color:#0a246a;margin-top:4px;margin-bottom:2px}
-      #minibia-bot-panel .mb-actions-inline-two{display:grid;grid-template-columns:1fr 1fr;gap:4px}
-      #minibia-bot-panel .mb-actions-inline-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px}
-      #minibia-bot-panel .mb-statusbar{background:#d4d0c8;border-top:1px solid #808080;padding:3px 6px;display:flex;gap:6px;font-size:13px}
-      #minibia-bot-panel .mb-statuspanel{border:1px solid;border-color:#808080 #ffffff #ffffff #808080;padding:1px 6px;font-size:13px;color:#000;white-space:nowrap}
-      #minibia-bot-panel .mb-row-three{display:grid;grid-template-columns:auto minmax(80px,1fr) 56px;align-items:center;gap:6px}
+      #minibia-bot-panel .mb-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      #minibia-bot-panel .mb-small-note{font-size:12px;color:#8a8f98}
+      #minibia-bot-panel .mb-label{font-size:13px;color:#e6e6e6}
+      #minibia-bot-panel .mb-note{font-size:11px;color:#5f6570;margin-top:4px}
+      #minibia-bot-panel .mb-list{display:flex;flex-direction:column;gap:5px}
+      #minibia-bot-panel .mb-list-row{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;border-bottom:1px solid #262a33;padding-bottom:5px}
+      #minibia-bot-panel .mb-creature-row{border-bottom:1px solid #262a33;padding:4px 0;font-size:12px;color:#c7cbd1}
+      #minibia-bot-panel .mb-creature-name{font-weight:600;color:#e6e6e6}
+      #minibia-bot-panel .mb-floor-label{font-size:12px;color:#4c7cf0;margin-top:6px;margin-bottom:3px;font-weight:600}
+      #minibia-bot-panel .mb-actions-inline-two{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+      #minibia-bot-panel .mb-actions-inline-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+      #minibia-bot-panel .mb-statusbar{background:#14161c;border-top:1px solid #262a33;padding:8px 12px;display:flex;gap:8px;font-size:11px;color:#8a8f98;border-radius:0 0 14px 14px}
+      #minibia-bot-panel .mb-statuspanel{border:1px solid #262a33;border-radius:6px;padding:2px 8px;font-size:11px;color:#c7cbd1;white-space:nowrap;background:#1c2028}
+      #minibia-bot-panel .mb-row-three{display:grid;grid-template-columns:auto minmax(80px,1fr) 56px;align-items:center;gap:8px}
       #minibia-bot-panel .mb-row-three input{min-width:0}
       #minibia-bot-panel #minibia-bot-visible-creatures-list{max-height:100px;overflow-y:auto}
       #minibia-bot-panel #minibia-bot-panic-trusted-list{max-height:80px;overflow-y:auto}
@@ -260,10 +285,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-accordion-header{display:none}
       #minibia-bot-panel .mb-accordion-body{display:block!important}
       #minibia-bot-panel .mb-accordion-body[hidden]{display:none!important}
-      #minibia-bot-panel[data-collapsed="true"]{width:26px;min-width:26px}
+      #minibia-bot-panel[data-collapsed="true"]{width:44px;min-width:44px;border-radius:22px}
       #minibia-bot-panel[data-collapsed="true"] .mb-tabs,
       #minibia-bot-panel[data-collapsed="true"] .mb-statusbar{display:none}
-      #minibia-bot-panel[data-collapsed="true"] .mb-titlebar{padding:2px;justify-content:center}
+      #minibia-bot-panel[data-collapsed="true"] .mb-titlebar{padding:10px;justify-content:center;border-radius:22px}
       #minibia-bot-panel[data-collapsed="true"] .mb-title{display:none}
     `;
     document.head.appendChild(style);
@@ -534,7 +559,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.addEventListener("keydown",unlockAudio);
     bot.addCleanup(()=>{panel.removeEventListener("pointerdown",unlockAudio);panel.removeEventListener("keydown",unlockAudio);});
 
-    applySavedPanelPosition(panel);
+    centerPanel(panel);
     enableDrag(panel);
     setPanelCollapsed(panel, getSavedPanelCollapsed());
     initAccordions(panel);
