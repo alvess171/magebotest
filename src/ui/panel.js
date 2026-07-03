@@ -307,6 +307,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <div class="mb-tab" data-tab="panic">Panic</div>
         <div class="mb-tab" data-tab="extra">Extra</div>
         <div class="mb-tab" data-tab="tools">Tools</div>
+        <div class="mb-tab" data-tab="chat">Chat</div>
         <div class="mb-tab" data-tab="config">Config</div>
       </div>
       <div class="mb-body">
@@ -515,6 +516,35 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-field"><span class="mb-field-label">Gemini API Key</span><input type="password" id="minibia-bot-talk-api-key" placeholder="API key" style="width:100%" /></div>
               <div class="mb-field"><span class="mb-field-label">Reply Prompt</span><textarea id="minibia-bot-talk-prompt" placeholder="Reply style prompt" style="width:100%"></textarea></div>
               <span class="mb-small-note" id="minibia-bot-talk-status">Status: idle</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABA: Chat -->
+        <div class="mb-tab-content" data-tab="chat">
+          <div class="mb-group"><span class="mb-group-title">Detector de Chat</span>
+            <div class="mb-stack">
+              <label class="mb-toggle"><input type="checkbox" id="mb-chat-enabled" /><span>Ativar detector de chat</span></label>
+              <span class="mb-small-note" id="mb-chat-status">Status: parado</span>
+              <div class="mb-field">
+                <span class="mb-field-label">Tocar alarme em</span>
+                <select id="mb-chat-alarme-em">
+                  <option value="qualquer">Qualquer mensagem</option>
+                  <option value="mencao">Só quando me mencionam</option>
+                </select>
+              </div>
+              <span class="mb-note">Canais monitorados: Default e Console.</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Termos Ignorados</span>
+            <div class="mb-stack">
+              <div class="mb-row-three">
+                <span class="mb-field-label">Novo termo</span>
+                <input type="text" id="mb-chat-ignore-input" placeholder="ex: hitpoints" />
+                <button type="button" class="mb-small-button" id="mb-chat-ignore-add">Add</button>
+              </div>
+              <div class="mb-list" id="mb-chat-ignore-list"></div>
+              <span class="mb-note">Mensagens com esses termos (ou desses remetentes) não disparam alarme.</span>
             </div>
           </div>
         </div>
@@ -836,6 +866,38 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     prDelB?.addEventListener("click",()=>{const n=prSelI?.value||"";if(!n)return;if(!confirm("Delete profile: "+n+"?"))return;bot.profiles?.delete?.(n);if(prNameI)prNameI.value="";refreshProfilesPanel();});
     prExpB?.addEventListener("click",()=>{const n=prSelI?.value||"";bot.profiles?.export?.(n||null);});
 
+    // ── Chat Detector ─────────────────────────────────────────
+    const chatEI=panel.querySelector("#mb-chat-enabled");
+    const chatStatusL=panel.querySelector("#mb-chat-status");
+    const chatAlarmeSel=panel.querySelector("#mb-chat-alarme-em");
+    const chatIgnoreInput=panel.querySelector("#mb-chat-ignore-input");
+    const chatIgnoreAddB=panel.querySelector("#mb-chat-ignore-add");
+
+    function refreshChatStatus() {
+      const s=bot.chatDetector?.status?.();
+      if(chatEI) chatEI.checked=!!s?.running;
+      if(chatStatusL) chatStatusL.textContent=s?.running?`Status: ativo • jogador: ${s.playerName||"?"}`:"Status: parado";
+      if(chatAlarmeSel) chatAlarmeSel.value=s?.config?.alarmeEm||"qualquer";
+    }
+    function renderChatIgnoreList() {
+      const list=panel.querySelector("#mb-chat-ignore-list"); if(!list) return;
+      const termos=bot.chatDetector?.status?.()?.config?.ignorarSeContiver||[];
+      list.innerHTML="";
+      if(!termos.length){const e=document.createElement("div");e.className="mb-small-note";e.textContent="Nenhum termo ignorado.";list.appendChild(e);return;}
+      termos.forEach((termo)=>{
+        const row=document.createElement("div"); row.className="mb-list-row";
+        const label=document.createElement("span"); label.textContent=termo;
+        const btn=document.createElement("button"); btn.type="button"; btn.className="mb-small-button"; btn.textContent="Remove";
+        btn.addEventListener("click",()=>{bot.chatDetector?.removeIgnored?.(termo);renderChatIgnoreList();});
+        row.appendChild(label); row.appendChild(btn); list.appendChild(row);
+      });
+    }
+    if(chatEI){chatEI.addEventListener("change",()=>{if(chatEI.checked){if(!bot.chatDetector?.start?.())chatEI.checked=false;}else bot.chatDetector?.stop?.();refreshChatStatus();});}
+    chatAlarmeSel?.addEventListener("change",()=>{bot.chatDetector?.updateConfig?.({alarmeEm:chatAlarmeSel.value});});
+    function addChatIgnore(){const v=chatIgnoreInput?.value?.trim()||"";if(!v)return;bot.chatDetector?.addIgnored?.(v);if(chatIgnoreInput)chatIgnoreInput.value="";renderChatIgnoreList();}
+    chatIgnoreAddB?.addEventListener("click",addChatIgnore);
+    chatIgnoreInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addChatIgnore();}});
+
     // ── Refresh inicial ───────────────────────────────────────
     refreshHomeLabel();refreshPanicStatus();refreshXrayStatus();
     renderGameMasterNames();renderTrustedNames();renderAttackTargetNames();
@@ -845,11 +907,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
     refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
-    refreshDistanceAttackStatus();
+    refreshDistanceAttackStatus();refreshChatStatus();renderChatIgnoreList();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();refreshChatStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
