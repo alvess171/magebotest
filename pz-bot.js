@@ -9215,10 +9215,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   // ---------- PROCESSAMENTO DE CADA MENSAGEM ----------
 
-  function deveIgnorar(mensagem) {
+  function deveIgnorar(mensagem, remetente) {
     const texto = (mensagem || "").toLowerCase();
+    const nome = (remetente || "").toLowerCase();
     return listaIgnorados.some(function (padrao) {
-      return texto.includes(padrao.toLowerCase());
+      const padraoMinusculo = padrao.toLowerCase();
+      return texto.includes(padraoMinusculo) || nome === padraoMinusculo;
     });
   }
 
@@ -9226,7 +9228,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const remetente = (msgObj.name || "Sistema").trim();
     const mensagem = msgObj.message || "";
 
-    if (deveIgnorar(mensagem)) return;
+    if (deveIgnorar(mensagem, remetente)) return;
 
     const souEu = playerName ? remetente.toLowerCase() === playerName.toLowerCase() : false;
     const fuiMencionado = playerName && !souEu && mensagem.toLowerCase().includes(playerName.toLowerCase());
