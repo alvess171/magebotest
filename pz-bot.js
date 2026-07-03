@@ -9143,6 +9143,39 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   let playerName = null;
   const ultimaContagemPorCanal = new Map(); // índice do canal -> qtd de mensagens já vistas
 
+  const CHAVE_STORAGE_IGNORAR = "minibiaChatDetector.ignorar";
+
+  function carregarIgnoradosSalvos() {
+    try {
+      const salvos = JSON.parse(localStorage.getItem(CHAVE_STORAGE_IGNORAR) || "[]");
+      return Array.isArray(salvos) ? salvos : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function salvarIgnorados() {
+    localStorage.setItem(CHAVE_STORAGE_IGNORAR, JSON.stringify(listaIgnorados));
+  }
+
+  // Lista final = palavras fixas do código + palavras adicionadas
+  // manualmente pelo botão (persistidas entre sessões).
+  const listaIgnorados = IGNORAR_SE_CONTIVER.concat(carregarIgnoradosSalvos());
+
+  function adicionarIgnorado(termo) {
+    const termoLimpo = termo.trim();
+    if (!termoLimpo) return;
+
+    if (listaIgnorados.some(function (t) { return t.toLowerCase() === termoLimpo.toLowerCase(); })) {
+      console.log("%c[Chat] \"" + termoLimpo + "\" já estava na lista de ignorados.", "color: gray;");
+      return;
+    }
+
+    listaIgnorados.push(termoLimpo);
+    salvarIgnorados();
+    console.log("%c[Chat] Passou a ignorar mensagens contendo: \"" + termoLimpo + "\"", "color: lightblue; font-weight: bold;");
+  }
+
 
   // ---------- ALARME SONORO ----------
 
@@ -9175,7 +9208,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   function deveIgnorar(mensagem) {
     const texto = (mensagem || "").toLowerCase();
-    return IGNORAR_SE_CONTIVER.some(function (padrao) {
+    return listaIgnorados.some(function (padrao) {
       return texto.includes(padrao.toLowerCase());
     });
   }
@@ -9245,6 +9278,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   // ---------- ALTERNAR LIGADO/DESLIGADO ----------
 
   let botaoFlutuante = null;
+  let botaoIgnorar = null;
 
   function atualizarBotao() {
     if (!botaoFlutuante) return;
@@ -9281,12 +9315,41 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     document.body.appendChild(botaoFlutuante);
     atualizarBotao();
     tornarArrastavel(botaoFlutuante);
+
+    criarBotaoIgnorar();
+  }
+
+  function criarBotaoIgnorar() {
+    botaoIgnorar = document.createElement("button");
+    botaoIgnorar.textContent = "🚫 + Ignorar";
+    botaoIgnorar.style.position = "fixed";
+    botaoIgnorar.style.bottom = "60px";
+    botaoIgnorar.style.right = "16px";
+    botaoIgnorar.style.zIndex = "999999";
+    botaoIgnorar.style.padding = "10px 14px";
+    botaoIgnorar.style.borderRadius = "20px";
+    botaoIgnorar.style.border = "none";
+    botaoIgnorar.style.color = "white";
+    botaoIgnorar.style.fontWeight = "bold";
+    botaoIgnorar.style.fontSize = "13px";
+    botaoIgnorar.style.cursor = "grab";
+    botaoIgnorar.style.background = "#7f8c8d";
+    botaoIgnorar.style.boxShadow = "0 2px 8px rgba(0,0,0,0.4)";
+    botaoIgnorar.style.touchAction = "none";
+    botaoIgnorar.style.userSelect = "none";
+
+    document.body.appendChild(botaoIgnorar);
+    tornarArrastavel(botaoIgnorar, function () {
+      const termo = window.prompt("Ignorar mensagens que contenham:");
+      if (termo) adicionarIgnorado(termo);
+    });
   }
 
   // Deixa o elemento arrastável tanto com mouse (PC) quanto touch (celular).
   // Só conta como "clique" (alterna o detector) se o dedo/mouse não
   // tiver se movido quase nada — senão, foi um arraste de verdade.
-  function tornarArrastavel(elemento) {
+  function tornarArrastavel(elemento, aoClicar) {
+    const acaoClique = aoClicar || alternarDetector;
     let arrastando = false;
     let moveu = false;
     let offsetX = 0;
@@ -9308,7 +9371,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       let novoLeft = clientX - offsetX;
       let novoTop = clientY - offsetY;
 
-      // Mantém o botão dentro da tela
       const largura = elemento.offsetWidth;
       const altura = elemento.offsetHeight;
       novoLeft = Math.max(0, Math.min(window.innerWidth - largura, novoLeft));
@@ -9324,13 +9386,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       arrastando = false;
       elemento.style.cursor = "grab";
 
-      // Se não moveu (ou moveu muito pouco), trata como clique normal.
       if (!moveu) {
-        alternarDetector();
+        acaoClique();
       }
     }
 
-    // Mouse (PC)
     elemento.addEventListener("mousedown", function (e) {
       e.preventDefault();
       posicaoInicial(e.clientX, e.clientY);
@@ -9342,7 +9402,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if (arrastando) soltar();
     });
 
-    // Touch (celular)
     elemento.addEventListener("touchstart", function (e) {
       const toque = e.touches[0];
       posicaoInicial(toque.clientX, toque.clientY);
