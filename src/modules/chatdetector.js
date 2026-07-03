@@ -1,6 +1,6 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installChatDetectorModule = function installChatDetectorModule(bot) {
+window.__minibiaBotBundle.installChatdetectorModule = function installChatdetectorModule(bot) {
   const configStorageKey = "minibiaBot.chatDetector.config";
 
   const defaultConfig = {
@@ -198,7 +198,7 @@ window.__minibiaBotBundle.installChatDetectorModule = function installChatDetect
     start();
   }
 
-  bot.chatDetector = {
+  bot.Chatdetector = {
     start,
     stop,
     status,
