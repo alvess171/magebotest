@@ -1435,8 +1435,77 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   if (config.enabled && route.length) start();
 
+  // ── VIGIA DE RECONEXÃO ───────────────────────────────────────
+  // Em vez de tentar adivinhar pelo estado interno da conexão,
+  // captura direto a mensagem que o jogo já escreve no console
+  // quando reconecta de verdade ("Reconnected to the gameserver.").
+  if (!window.__caveReconnectHookInstalled) {
+    window.__caveReconnectHookInstalled = true;
+    const originalConsoleLog = console.log.bind(console);
+
+    console.log = function (...args) {
+      originalConsoleLog(...args);
+      try {
+        const texto = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
+        if (texto.includes("Reconnected to the gameserver")) {
+          window.dispatchEvent(new CustomEvent("minibia:reconnected"));
+        }
+      } catch (e) {
+        // silencioso — não deixa o hook quebrar o console original
+      }
+    };
+  }
+
+  window.addEventListener("minibia:reconnected", function () {
+    bot.log("cave reconnect detected (via console hook)");
+    window.setTimeout(() => {
+      if (route.length) {
+        stop({ persistEnabled: false });
+        const iniciou = start();
+        bot.log("cave bot desativado e reativado após reconexão", { sucesso: iniciou });
+      }
+    }, 2000);
+  });
+
+  // ── Auto Record de Waypoints ─────────────────────────────────
+  // Em vez de clicar "Add Waypoint" toda hora, liga isso e anda —
+  // ele grava a rota sozinho enquanto você caminha (reaproveitando
+  // o proximity skip que já existe, então não duplica pontos perto
+  // um do outro).
+  const autoRecordState = {
+    recording: false,
+    timerId: null,
+  };
+
+  function startAutoRecord(intervalMs = 600) {
+    if (autoRecordState.recording) {
+      bot.log("cave auto record already running");
+      return false;
+    }
+    autoRecordState.recording = true;
+    autoRecordState.timerId = window.setInterval(() => {
+      addWaypointCurrentSpot();
+    }, intervalMs);
+    bot.log("cave auto record started");
+    return true;
+  }
+
+  function stopAutoRecord() {
+    if (autoRecordState.timerId != null) {
+      window.clearInterval(autoRecordState.timerId);
+      autoRecordState.timerId = null;
+    }
+    autoRecordState.recording = false;
+    bot.log("cave auto record stopped");
+    return true;
+  }
+
+  bot.addCleanup(stopAutoRecord);
+
   bot.cave = {
     start, stop, status, updateConfig, config,
+    startAutoRecord, stopAutoRecord,
+    isAutoRecording: () => autoRecordState.recording,
     hotkey: {
       updateConfig: updateHotkeyConfig,
       enable()  { hotkeyConfig.enabled = true;  persistHotkeyConfig(); bot.log("cave hotkey habilitado"); },
