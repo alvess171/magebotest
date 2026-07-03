@@ -9128,6 +9128,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const HOTKEY_SHIFT = true;
   const HOTKEY_TECLA = "m";
 
+  // Só processa mensagens desses canais (nome exato, como aparece no jogo).
+  // Deixe [] (vazio) pra processar todos os canais.
+  const CANAIS_PERMITIDOS = ["Default", "Console"];
+
+  // Se a detecção automática do nome falhar, defina aqui manualmente
+  // (ex: "Hessin"). Deixe null pra continuar tentando detectar sozinho.
+  const PLAYER_NAME_OVERRIDE = null;
+
 
   // ---------- ESTADO ----------
 
@@ -9173,7 +9181,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
   function processarMensagem(msgObj, nomeCanal, ehHistorico) {
-    const remetente = msgObj.name || "Sistema";
+    const remetente = (msgObj.name || "Sistema").trim();
     const mensagem = msgObj.message || "";
 
     if (deveIgnorar(mensagem)) return;
@@ -9214,12 +9222,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     }
 
     channelManager.channels.forEach(function (channel, indice) {
+      const nomeCanal = channel.name || ("Canal " + indice);
+
+      if (CANAIS_PERMITIDOS.length > 0 && !CANAIS_PERMITIDOS.includes(nomeCanal)) {
+        return; // ignora canais fora da lista
+      }
+
       const contents = channel.__contents || [];
       const contagemAnterior = ultimaContagemPorCanal.get(indice) || 0;
 
       if (contents.length > contagemAnterior) {
         for (let i = contagemAnterior; i < contents.length; i++) {
-          processarMensagem(contents[i], channel.name || ("Canal " + indice), ehVerificacaoInicial);
+          processarMensagem(contents[i], nomeCanal, ehVerificacaoInicial);
         }
       }
 
@@ -9358,7 +9372,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   // ---------- INICIALIZAÇÃO ----------
 
   function iniciar() {
-    playerName = window.gameClient?.player?.name || null;
+    playerName = PLAYER_NAME_OVERRIDE || (window.gameClient?.player?.name || "").trim() || null;
 
     criarBotaoFlutuante();
     configurarHotkey();
