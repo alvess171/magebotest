@@ -9093,11 +9093,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   boot(bundle);
 })();
 // ============================================================
-// Minibia — Detector de Mensagens de Chat
+// Minibia — Detector de Mensagens de Chat (via API interna)
 // ============================================================
-// Detecta mensagens novas no chat e toca um alarme sonoro.
-// Detecta seu nome de personagem automaticamente (suas próprias
-// mensagens aparecem em amarelo no chat).
+// Lê as mensagens direto da memória do jogo
+// (window.gameClient.interface.channelManager), sem precisar
+// clicar em abas nem observar o DOM. Muito mais confiável.
 //
 // Como usar: cole isso no console (F12) enquanto estiver no jogo.
 // ============================================================
@@ -9106,54 +9106,34 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   // ---------- CONFIGURAÇÃO ----------
 
-  const VOLUME = 0.3;                        // volume do alarme (0 a 1)
-  const TOM_HZ = 880;                        // tom do alarme
-  const QTD_BIPS = 3;                        // quantos bips por menção
-
-  // Cor usada pelo jogo pras SUAS próprias mensagens (amarelo).
-  // Se não bater no seu jogo, ajuste esse valor.
-  const COR_PROPRIA = "rgb(255, 255, 0)";
+  const VOLUME = 0.3;                  // volume do alarme (0 a 1)
+  const TOM_HZ = 880;                  // tom do alarme
+  const QTD_BIPS = 3;                  // quantos bips por menção
+  const POLL_INTERVAL_MS = 500;        // com que frequência verificar novas mensagens
 
   // Quando tocar o alarme:
   //   "mencao"   -> só quando alguém (que não seja você) mencionar seu nome
   //   "qualquer" -> em qualquer mensagem nova de qualquer pessoa
   const ALARME_EM = "qualquer";
 
-  // Mensagens que contenham qualquer um desses textos são totalmente
-  // ignoradas (não aparecem no console, não tocam alarme).
+  // Mensagens que contenham qualquer um desses textos são ignoradas
+  // (não aparecem no console do detector, não tocam alarme).
   const IGNORAR_SE_CONTIVER = [
     "hitpoints",
     "attack"
   ];
 
-  // Abas de chat que só renderizam mensagem quando estão "ativas".
-  // O script alterna rapidinho pra essa aba e volta, de tempos em
-  // tempos, pra forçar o jogo a desenhar as mensagens novas.
-  const ABAS_FORCAR_ATUALIZACAO = ["Console"];
-  const INTERVALO_FORCAR_MS = 5000; // a cada quantos ms verificar
-
-  // Atalho de teclado pra ligar/desligar o detector (Ctrl + Shift + M).
-  // Pode trocar a tecla mudando HOTKEY_TECLA (ex: "j", "p", etc).
+  // Atalho de teclado pra ligar/desligar o detector.
   const HOTKEY_CTRL = true;
   const HOTKEY_SHIFT = true;
   const HOTKEY_TECLA = "m";
 
 
-  // ---------- NOME DO JOGADOR (detectado automaticamente) ----------
+  // ---------- ESTADO ----------
 
-  let playerName = null;
-  let emTrocaForcada = false; // true só durante a troca automática de aba
   let detectorAtivo = true;
-
-  function tentarDetectarNome(spanElement) {
-    if (playerName) return; // já detectado, não precisa de novo
-
-    const cor = spanElement.style.color;
-    if (cor === COR_PROPRIA) {
-      playerName = spanElement.getAttribute("name");
-      console.log("%c[Chat] Nome do jogador detectado: " + playerName, "color: lightgreen;");
-    }
-  }
+  let playerName = null;
+  const ultimaContagemPorCanal = new Map(); // índice do canal -> qtd de mensagens já vistas
 
 
   // ---------- ALARME SONORO ----------
@@ -9186,42 +9166,37 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   // ---------- PROCESSAMENTO DE CADA MENSAGEM ----------
 
   function deveIgnorar(mensagem) {
-    const texto = mensagem.toLowerCase();
+    const texto = (mensagem || "").toLowerCase();
     return IGNORAR_SE_CONTIVER.some(function (padrao) {
       return texto.includes(padrao.toLowerCase());
     });
   }
 
-  function processarMensagem(spanElement, ehHistorico) {
-    if (!detectorAtivo) return;
+  function processarMensagem(msgObj, nomeCanal, ehHistorico) {
+    const remetente = msgObj.name || "Sistema";
+    const mensagem = msgObj.message || "";
 
-    tentarDetectarNome(spanElement);
-
-    const remetente = spanElement.getAttribute("name") || "Desconhecido";
-    const mensagem = spanElement.getAttribute("data-message") || spanElement.textContent.trim();
-
-    if (deveIgnorar(mensagem)) {
-      spanElement.style.display = "none"; // esconde da tela do jogo também
-      return;
-    }
+    if (deveIgnorar(mensagem)) return;
 
     const souEu = playerName ? remetente.toLowerCase() === playerName.toLowerCase() : false;
     const fuiMencionado = playerName && !souEu && mensagem.toLowerCase().includes(playerName.toLowerCase());
 
     const deveAlarmar =
-      !ehHistorico && !emTrocaForcada && (
+      !ehHistorico && detectorAtivo && (
         ALARME_EM === "qualquer" ? !souEu :
         ALARME_EM === "mencao" ? fuiMencionado :
         false
       );
 
+    const prefixo = "[" + nomeCanal + "]";
+
     if (fuiMencionado) {
       console.log(
-        "%c[MENÇÃO] " + remetente + ": " + mensagem,
+        "%c" + prefixo + " [MENÇÃO] " + remetente + ": " + mensagem,
         "color: orange; font-weight: bold;"
       );
     } else {
-      console.log("[" + remetente + "] " + mensagem);
+      console.log(prefixo + " [" + remetente + "] " + mensagem);
     }
 
     if (deveAlarmar) {
@@ -9230,44 +9205,26 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
 
-  // ---------- FORÇAR ATUALIZAÇÃO DE ABAS "PREGUIÇOSAS" ----------
+  // ---------- VERIFICAÇÃO PERIÓDICA DOS CANAIS ----------
 
-  function encontrarAba(nome) {
-    const abas = document.querySelectorAll(".chat-title");
-    for (const aba of abas) {
-      if (aba.textContent.trim() === nome) return aba;
+  function verificarCanais(ehVerificacaoInicial) {
+    const channelManager = window.gameClient?.interface?.channelManager;
+    if (!channelManager || !Array.isArray(channelManager.channels)) {
+      return;
     }
-    return null;
-  }
 
-  function forcarAtualizacaoAbas() {
-    if (!detectorAtivo) return;
+    channelManager.channels.forEach(function (channel, indice) {
+      const contents = channel.__contents || [];
+      const contagemAnterior = ultimaContagemPorCanal.get(indice) || 0;
 
-    // Descobre qual aba está ativa agora, pra voltar pra ela depois.
-    const abaAtivaAntes = document.querySelector(".chat-title.selected");
-    const nomeAbaAtivaAntes = abaAtivaAntes ? abaAtivaAntes.textContent.trim() : null;
-
-    emTrocaForcada = true; // mensagens detectadas a partir daqui não alarmam
-
-    ABAS_FORCAR_ATUALIZACAO.forEach(function (nomeAba) {
-      const aba = encontrarAba(nomeAba);
-      if (aba) aba.click();
-    });
-
-    // Espera um instante (dá tempo do jogo renderizar as mensagens
-    // pendentes) e depois volta pra aba que estava ativa antes.
-    setTimeout(function () {
-      if (nomeAbaAtivaAntes) {
-        const abaOriginal = encontrarAba(nomeAbaAtivaAntes);
-        if (abaOriginal) abaOriginal.click();
+      if (contents.length > contagemAnterior) {
+        for (let i = contagemAnterior; i < contents.length; i++) {
+          processarMensagem(contents[i], channel.name || ("Canal " + indice), ehVerificacaoInicial);
+        }
       }
 
-      // Espera mais um pouco (pra cobrir a re-renderização causada
-      // pela volta da aba) antes de liberar o alarme normal de novo.
-      setTimeout(function () {
-        emTrocaForcada = false;
-      }, 300);
-    }, 300);
+      ultimaContagemPorCanal.set(indice, contents.length);
+    });
   }
 
 
@@ -9290,9 +9247,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     atualizarBotao();
   }
 
-
-  // ---------- BOTÃO FLUTUANTE ----------
-
   function criarBotaoFlutuante() {
     botaoFlutuante = document.createElement("button");
     botaoFlutuante.style.position = "fixed";
@@ -9305,17 +9259,88 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     botaoFlutuante.style.color = "white";
     botaoFlutuante.style.fontWeight = "bold";
     botaoFlutuante.style.fontSize = "13px";
-    botaoFlutuante.style.cursor = "pointer";
+    botaoFlutuante.style.cursor = "grab";
     botaoFlutuante.style.boxShadow = "0 2px 8px rgba(0,0,0,0.4)";
-
-    botaoFlutuante.addEventListener("click", alternarDetector);
+    botaoFlutuante.style.touchAction = "none"; // evita rolar a página ao arrastar no celular
+    botaoFlutuante.style.userSelect = "none";
 
     document.body.appendChild(botaoFlutuante);
     atualizarBotao();
+    tornarArrastavel(botaoFlutuante);
   }
 
+  // Deixa o elemento arrastável tanto com mouse (PC) quanto touch (celular).
+  // Só conta como "clique" (alterna o detector) se o dedo/mouse não
+  // tiver se movido quase nada — senão, foi um arraste de verdade.
+  function tornarArrastavel(elemento) {
+    let arrastando = false;
+    let moveu = false;
+    let offsetX = 0;
+    let offsetY = 0;
 
-  // ---------- ATALHO DE TECLADO (LIGAR/DESLIGAR) ----------
+    function posicaoInicial(clientX, clientY) {
+      const rect = elemento.getBoundingClientRect();
+      offsetX = clientX - rect.left;
+      offsetY = clientY - rect.top;
+      arrastando = true;
+      moveu = false;
+      elemento.style.cursor = "grabbing";
+    }
+
+    function mover(clientX, clientY) {
+      if (!arrastando) return;
+      moveu = true;
+
+      let novoLeft = clientX - offsetX;
+      let novoTop = clientY - offsetY;
+
+      // Mantém o botão dentro da tela
+      const largura = elemento.offsetWidth;
+      const altura = elemento.offsetHeight;
+      novoLeft = Math.max(0, Math.min(window.innerWidth - largura, novoLeft));
+      novoTop = Math.max(0, Math.min(window.innerHeight - altura, novoTop));
+
+      elemento.style.left = novoLeft + "px";
+      elemento.style.top = novoTop + "px";
+      elemento.style.right = "auto";
+      elemento.style.bottom = "auto";
+    }
+
+    function soltar() {
+      arrastando = false;
+      elemento.style.cursor = "grab";
+
+      // Se não moveu (ou moveu muito pouco), trata como clique normal.
+      if (!moveu) {
+        alternarDetector();
+      }
+    }
+
+    // Mouse (PC)
+    elemento.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+      posicaoInicial(e.clientX, e.clientY);
+    });
+    document.addEventListener("mousemove", function (e) {
+      mover(e.clientX, e.clientY);
+    });
+    document.addEventListener("mouseup", function () {
+      if (arrastando) soltar();
+    });
+
+    // Touch (celular)
+    elemento.addEventListener("touchstart", function (e) {
+      const toque = e.touches[0];
+      posicaoInicial(toque.clientX, toque.clientY);
+    }, { passive: true });
+    document.addEventListener("touchmove", function (e) {
+      const toque = e.touches[0];
+      mover(toque.clientX, toque.clientY);
+    }, { passive: true });
+    document.addEventListener("touchend", function () {
+      if (arrastando) soltar();
+    });
+  }
 
   function configurarHotkey() {
     document.addEventListener("keydown", function (evento) {
@@ -9333,47 +9358,30 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   // ---------- INICIALIZAÇÃO ----------
 
   function iniciar() {
-    configurarHotkey();
+    playerName = window.gameClient?.player?.name || null;
+
     criarBotaoFlutuante();
+    configurarHotkey();
 
-    // Tenta detectar o nome já a partir de mensagens que já estavam
-    // na tela antes do script iniciar.
-    document.querySelectorAll(".chat-message").forEach(tentarDetectarNome);
+    // Primeira passada: registra tudo que já existe como "histórico"
+    // (não dispara alarme), só pra estabelecer o ponto de partida.
+    verificarCanais(true);
 
-    // Aplica o mesmo filtro (esconder "hitpoints"/"attack", etc) nas
-    // mensagens que já estavam na tela antes do script iniciar —
-    // sem disparar alarme pra elas (só faz sentido pra mensagens novas).
-    document.querySelectorAll(".chat-message").forEach(function (span) {
-      processarMensagem(span, true);
-    });
+    // A partir daqui, verifica periodicamente por mensagens novas.
+    setInterval(function () {
+      verificarCanais(false);
+    }, POLL_INTERVAL_MS);
 
-    // Observa a página inteira (não só a aba de chat visível no momento).
-    // Isso garante que mensagens em OUTRAS abas (ex: privado com outro
-    // jogador) sejam detectadas mesmo sem clicar na aba pra abrir ela.
-    const observer = new MutationObserver(function (mutations) {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType === 1 && node.classList && node.classList.contains("chat-message")) {
-            processarMensagem(node);
-          }
-        }
-      }
-    });
-
-    observer.observe(document.body, { childList: true, subtree: true });
-
-    // Alterna periodicamente pras abas "preguiçosas" (que só renderizam
-    // quando ativas), pra garantir que o detector também as capture.
-    if (ABAS_FORCAR_ATUALIZACAO.length > 0) {
-      setInterval(forcarAtualizacaoAbas, INTERVALO_FORCAR_MS);
-    }
-
-    console.log("[Chat] Detector ativo (observando todas as abas). Aguardando mensagens...");
-    if (!playerName) {
-      console.log("[Chat] Nome do jogador ainda não detectado — mande uma mensagem no chat pra eu identificar.");
-    }
+    console.log(
+      "%c[Chat] Detector ativo via API interna. Jogador: " + (playerName || "não detectado"),
+      "color: lightgreen; font-weight: bold;"
+    );
   }
 
-  iniciar();
+  if (window.gameClient) {
+    iniciar();
+  } else {
+    console.error("[Chat] window.gameClient não encontrado. O jogo já carregou completamente?");
+  }
 
 })();
