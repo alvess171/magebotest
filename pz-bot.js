@@ -9590,13 +9590,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 })();
 
 
-// ===== REATIVADOR AUTOMÁTICO DO CAVE BOT APÓS RECONEXÃO =====
+// ===== REATIVADOR AUTOMÁTICO DE MÓDULOS APÓS RECONEXÃO (CAVE + PANIC) =====
 // ============================================================
-// Minibia — Reativador automático do Cave Bot após reconexão
+// Minibia — Reativador automático de módulos após reconexão
 // ============================================================
 // Fica de olho no status da conexão com o servidor. Quando detecta
-// que caiu e depois voltou, reativa o cave bot automaticamente
-// (só se ele estava ativo antes de cair).
+// que caiu e depois voltou, reativa o cave bot e o panic runner
+// (que cuida do "auto return after flee") automaticamente.
 // ============================================================
 
 (function () {
@@ -9606,6 +9606,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   let estavaConectado = null; // null = ainda não sabemos o estado inicial
   let caveEstavaAtivoAntesDeCair = false;
+  let panicEstavaAtivoAntesDeCair = false;
 
   function estaConectado() {
     // __wasConnected reflete se a última verificação de rede teve sucesso.
@@ -9624,31 +9625,49 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     // Detectou queda de conexão
     if (estavaConectado && !conectadoAgora) {
       caveEstavaAtivoAntesDeCair = !!window.minibiaBot?.cave?.status?.().running;
-      console.log("%c[Cave-Auto] Conexão caiu. Cave bot estava ativo: " + caveEstavaAtivoAntesDeCair, "color: orange;");
+      panicEstavaAtivoAntesDeCair = !!window.minibiaBot?.panic?.status?.().running;
+      console.log(
+        "%c[Reconnect-Auto] Conexão caiu. Cave ativo: " + caveEstavaAtivoAntesDeCair +
+        " | Panic (auto return) ativo: " + panicEstavaAtivoAntesDeCair,
+        "color: orange;"
+      );
     }
 
     // Detectou volta da conexão
     if (!estavaConectado && conectadoAgora) {
-      console.log("%c[Cave-Auto] Conexão voltou.", "color: lightgreen;");
+      console.log("%c[Reconnect-Auto] Conexão voltou.", "color: lightgreen;");
 
-      if (caveEstavaAtivoAntesDeCair) {
-        setTimeout(function () {
-          const jaRodando = window.minibiaBot?.cave?.status?.().running;
-          if (!jaRodando && window.minibiaBot?.cave?.start) {
+      setTimeout(function () {
+        // Reativa o cave bot, se estava ativo antes de cair
+        if (caveEstavaAtivoAntesDeCair) {
+          const caveJaRodando = window.minibiaBot?.cave?.status?.().running;
+          if (!caveJaRodando && window.minibiaBot?.cave?.start) {
             const iniciou = window.minibiaBot.cave.start();
             console.log(
-              "%c[Cave-Auto] Reativando cave bot após reconexão: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
+              "%c[Reconnect-Auto] Cave bot reativado: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
               "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
             );
           }
-        }, ESPERA_APOS_RECONECTAR);
-      }
+        }
+
+        // Reativa o panic runner (que cuida do "auto return after flee")
+        if (panicEstavaAtivoAntesDeCair) {
+          const panicJaRodando = window.minibiaBot?.panic?.status?.().running;
+          if (!panicJaRodando && window.minibiaBot?.panic?.start) {
+            const iniciou = window.minibiaBot.panic.start();
+            console.log(
+              "%c[Reconnect-Auto] Panic runner reativado: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
+              "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
+            );
+          }
+        }
+      }, ESPERA_APOS_RECONECTAR);
     }
 
     estavaConectado = conectadoAgora;
   }
 
   setInterval(verificarConexao, INTERVALO_MS);
-  console.log("[Cave-Auto] Vigia de reconexão ativo.");
+  console.log("[Reconnect-Auto] Vigia de reconexão ativo (cave + panic).");
 
 })();
