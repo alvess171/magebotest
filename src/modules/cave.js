@@ -1460,8 +1460,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       bot.log("cave reconnect detected");
       window.setTimeout(() => {
         if (route.length) {
+          stop({ persistEnabled: false });
           const iniciou = start();
-          bot.log("cave bot ativado após reconexão", { sucesso: iniciou });
+          bot.log("cave bot desativado e reativado após reconexão", { sucesso: iniciou });
         }
       }, 2000);
     }
