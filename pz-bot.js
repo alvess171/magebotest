@@ -9176,6 +9176,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     console.log("%c[Chat] Passou a ignorar mensagens contendo: \"" + termoLimpo + "\"", "color: lightblue; font-weight: bold;");
   }
 
+  function removerIgnorado(termo) {
+    const indice = listaIgnorados.indexOf(termo);
+    if (indice === -1) return;
+
+    listaIgnorados.splice(indice, 1);
+    salvarIgnorados();
+    console.log("%c[Chat] Removido da lista de ignorados: \"" + termo + "\"", "color: lightblue;");
+  }
+
 
   // ---------- ALARME SONORO ----------
 
@@ -9343,6 +9352,125 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       const termo = window.prompt("Ignorar mensagens que contenham:");
       if (termo) adicionarIgnorado(termo);
     });
+
+    criarBotaoLista();
+  }
+
+  let botaoLista = null;
+  let painelLista = null;
+
+  function criarBotaoLista() {
+    botaoLista = document.createElement("button");
+    botaoLista.textContent = "📋 Lista";
+    botaoLista.style.position = "fixed";
+    botaoLista.style.bottom = "104px";
+    botaoLista.style.right = "16px";
+    botaoLista.style.zIndex = "999999";
+    botaoLista.style.padding = "10px 14px";
+    botaoLista.style.borderRadius = "20px";
+    botaoLista.style.border = "none";
+    botaoLista.style.color = "white";
+    botaoLista.style.fontWeight = "bold";
+    botaoLista.style.fontSize = "13px";
+    botaoLista.style.cursor = "grab";
+    botaoLista.style.background = "#3498db";
+    botaoLista.style.boxShadow = "0 2px 8px rgba(0,0,0,0.4)";
+    botaoLista.style.touchAction = "none";
+    botaoLista.style.userSelect = "none";
+
+    document.body.appendChild(botaoLista);
+    tornarArrastavel(botaoLista, alternarPainelLista);
+  }
+
+  function alternarPainelLista() {
+    if (painelLista) {
+      painelLista.remove();
+      painelLista = null;
+      return;
+    }
+
+    painelLista = document.createElement("div");
+    painelLista.style.position = "fixed";
+    painelLista.style.top = "50%";
+    painelLista.style.left = "50%";
+    painelLista.style.transform = "translate(-50%, -50%)";
+    painelLista.style.zIndex = "9999999";
+    painelLista.style.background = "#1e1e1e";
+    painelLista.style.color = "white";
+    painelLista.style.padding = "16px";
+    painelLista.style.borderRadius = "10px";
+    painelLista.style.minWidth = "240px";
+    painelLista.style.maxWidth = "80vw";
+    painelLista.style.maxHeight = "70vh";
+    painelLista.style.overflowY = "auto";
+    painelLista.style.boxShadow = "0 4px 20px rgba(0,0,0,0.6)";
+    painelLista.style.fontFamily = "Verdana, sans-serif";
+    painelLista.style.fontSize = "13px";
+
+    renderizarPainelLista();
+    document.body.appendChild(painelLista);
+  }
+
+  function renderizarPainelLista() {
+    painelLista.innerHTML = "";
+
+    const titulo = document.createElement("div");
+    titulo.textContent = "Termos ignorados";
+    titulo.style.fontWeight = "bold";
+    titulo.style.marginBottom = "10px";
+    titulo.style.fontSize = "14px";
+    painelLista.appendChild(titulo);
+
+    if (listaIgnorados.length === 0) {
+      const vazio = document.createElement("div");
+      vazio.textContent = "Nenhum termo ignorado ainda.";
+      vazio.style.color = "#999";
+      painelLista.appendChild(vazio);
+    }
+
+    listaIgnorados.forEach(function (termo) {
+      const linha = document.createElement("div");
+      linha.style.display = "flex";
+      linha.style.justifyContent = "space-between";
+      linha.style.alignItems = "center";
+      linha.style.padding = "6px 0";
+      linha.style.borderBottom = "1px solid #333";
+
+      const texto = document.createElement("span");
+      texto.textContent = termo;
+
+      const botaoRemover = document.createElement("button");
+      botaoRemover.textContent = "✕";
+      botaoRemover.style.background = "#e74c3c";
+      botaoRemover.style.color = "white";
+      botaoRemover.style.border = "none";
+      botaoRemover.style.borderRadius = "50%";
+      botaoRemover.style.width = "22px";
+      botaoRemover.style.height = "22px";
+      botaoRemover.style.cursor = "pointer";
+      botaoRemover.style.marginLeft = "10px";
+      botaoRemover.addEventListener("click", function () {
+        removerIgnorado(termo);
+        renderizarPainelLista();
+      });
+
+      linha.appendChild(texto);
+      linha.appendChild(botaoRemover);
+      painelLista.appendChild(linha);
+    });
+
+    const botaoFechar = document.createElement("button");
+    botaoFechar.textContent = "Fechar";
+    botaoFechar.style.marginTop = "12px";
+    botaoFechar.style.width = "100%";
+    botaoFechar.style.padding = "8px";
+    botaoFechar.style.background = "#555";
+    botaoFechar.style.color = "white";
+    botaoFechar.style.border = "none";
+    botaoFechar.style.borderRadius = "6px";
+    botaoFechar.style.cursor = "pointer";
+    botaoFechar.addEventListener("click", alternarPainelLista);
+    painelLista.appendChild(botaoFechar);
   }
 
   // Deixa o elemento arrastável tanto com mouse (PC) quanto touch (celular).
