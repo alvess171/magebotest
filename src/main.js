@@ -17,6 +17,7 @@
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
+    ["Chatdetector.js",           "minibiaBot.eat.config"],
   ];
 
   function getPersistedEnabledSnapshot(bot) {
@@ -70,6 +71,7 @@
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
     currentBundle.installMeleePositionModule(bot);
+    currentBundle.installChatdetectorModule(bot);
     currentBundle.installProfilesModule(bot);
     currentBundle.installPanel(bot);
 
@@ -100,7 +102,9 @@
       autoSpell      : bot.autoSpell.status(),
       distanceAttack : bot.distanceAttack.status(),
       meleePosition  : bot.meleePosition.status(),
+      Chatdetector  : bot.Chatdetector.status(),
       profiles       : bot.profiles.status(),
+      
     });
 
     window.minibiaBot = bot;
