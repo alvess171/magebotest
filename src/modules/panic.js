@@ -585,53 +585,36 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   }
 
   // ── VIGIA DE RECONEXÃO ───────────────────────────────────────
-  // Fica de olho no status da conexão com o servidor. Se cair e
-  // voltar, garante que o panic runner (que cuida do "auto return
-  // after flee") volte a rodar, caso tenha parado por algum motivo.
-  const reconnectWatcherState = {
-    estavaConectado: null,
-    timerId: null,
-  };
+  // Captura direto a mensagem que o jogo já escreve no console
+  // quando reconecta de verdade ("Reconnected to the gameserver.").
+  // Reaproveita o mesmo hook do console que o cave.js instala —
+  // se o cave.js já rodou antes, não instala de novo.
+  if (!window.__caveReconnectHookInstalled) {
+    window.__caveReconnectHookInstalled = true;
+    const originalConsoleLogPanic = console.log.bind(console);
 
-  function estaConectado() {
-    return !!window.gameClient?.networkManager?.state?.__wasConnected;
-  }
-
-  function verificarReconexao() {
-    const conectadoAgora = estaConectado();
-
-    if (reconnectWatcherState.estavaConectado === null) {
-      reconnectWatcherState.estavaConectado = conectadoAgora;
-      return;
-    }
-
-    if (!reconnectWatcherState.estavaConectado && conectadoAgora) {
-      bot.log("panic reconnect detected");
-      window.setTimeout(() => {
-        if (!state.running && shouldRun()) {
-          syncRunningState();
-          bot.log("panic runner reativado após reconexão");
+    console.log = function (...args) {
+      originalConsoleLogPanic(...args);
+      try {
+        const texto = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
+        if (texto.includes("Reconnected to the gameserver")) {
+          window.dispatchEvent(new CustomEvent("minibia:reconnected"));
         }
-      }, 2000);
-    }
-
-    reconnectWatcherState.estavaConectado = conectadoAgora;
+      } catch (e) {
+        // silencioso — não deixa o hook quebrar o console original
+      }
+    };
   }
 
-  function startReconnectWatcher() {
-    if (reconnectWatcherState.timerId != null) return;
-    reconnectWatcherState.timerId = window.setInterval(verificarReconexao, 1000);
-  }
-
-  function stopReconnectWatcher() {
-    if (reconnectWatcherState.timerId != null) {
-      window.clearInterval(reconnectWatcherState.timerId);
-      reconnectWatcherState.timerId = null;
-    }
-  }
-
-  startReconnectWatcher();
-  bot.addCleanup(stopReconnectWatcher);
+  window.addEventListener("minibia:reconnected", function () {
+    bot.log("panic reconnect detected (via console hook)");
+    window.setTimeout(() => {
+      if (!state.running && shouldRun()) {
+        syncRunningState();
+        bot.log("panic runner reativado após reconexão");
+      }
+    }, 2000);
+  });
 
   bot.panic = {
     start,
