@@ -17,7 +17,7 @@
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
-    ["Chatdetector.js",           "minibiaBot.eat.config"],
+    ["Chatdetector",              "minibiaBot.chatDetector.config"],
   ];
 
   function getPersistedEnabledSnapshot(bot) {
