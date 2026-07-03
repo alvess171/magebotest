@@ -9132,11 +9132,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const ABAS_FORCAR_ATUALIZACAO = ["Console"];
   const INTERVALO_FORCAR_MS = 5000; // a cada quantos ms verificar
 
+  // Atalho de teclado pra ligar/desligar o detector (Ctrl + Shift + M).
+  // Pode trocar a tecla mudando HOTKEY_TECLA (ex: "j", "p", etc).
+  const HOTKEY_CTRL = true;
+  const HOTKEY_SHIFT = true;
+  const HOTKEY_TECLA = "m";
+
 
   // ---------- NOME DO JOGADOR (detectado automaticamente) ----------
 
   let playerName = null;
   let emTrocaForcada = false; // true só durante a troca automática de aba
+  let detectorAtivo = true;
 
   function tentarDetectarNome(spanElement) {
     if (playerName) return; // já detectado, não precisa de novo
@@ -9186,6 +9193,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
   function processarMensagem(spanElement, ehHistorico) {
+    if (!detectorAtivo) return;
+
     tentarDetectarNome(spanElement);
 
     const remetente = spanElement.getAttribute("name") || "Desconhecido";
@@ -9232,6 +9241,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
   function forcarAtualizacaoAbas() {
+    if (!detectorAtivo) return;
+
     // Descobre qual aba está ativa agora, pra voltar pra ela depois.
     const abaAtivaAntes = document.querySelector(".chat-title.selected");
     const nomeAbaAtivaAntes = abaAtivaAntes ? abaAtivaAntes.textContent.trim() : null;
@@ -9260,9 +9271,71 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
 
+  // ---------- ALTERNAR LIGADO/DESLIGADO ----------
+
+  let botaoFlutuante = null;
+
+  function atualizarBotao() {
+    if (!botaoFlutuante) return;
+    botaoFlutuante.textContent = detectorAtivo ? "🔔 Chat ON" : "🔕 Chat OFF";
+    botaoFlutuante.style.background = detectorAtivo ? "#2ecc71" : "#e74c3c";
+  }
+
+  function alternarDetector() {
+    detectorAtivo = !detectorAtivo;
+    console.log(
+      "%c[Chat] Detector " + (detectorAtivo ? "LIGADO ✅" : "DESLIGADO ⛔"),
+      "color: " + (detectorAtivo ? "lightgreen" : "red") + "; font-weight: bold; font-size: 14px;"
+    );
+    atualizarBotao();
+  }
+
+
+  // ---------- BOTÃO FLUTUANTE ----------
+
+  function criarBotaoFlutuante() {
+    botaoFlutuante = document.createElement("button");
+    botaoFlutuante.style.position = "fixed";
+    botaoFlutuante.style.bottom = "16px";
+    botaoFlutuante.style.right = "16px";
+    botaoFlutuante.style.zIndex = "999999";
+    botaoFlutuante.style.padding = "10px 14px";
+    botaoFlutuante.style.borderRadius = "20px";
+    botaoFlutuante.style.border = "none";
+    botaoFlutuante.style.color = "white";
+    botaoFlutuante.style.fontWeight = "bold";
+    botaoFlutuante.style.fontSize = "13px";
+    botaoFlutuante.style.cursor = "pointer";
+    botaoFlutuante.style.boxShadow = "0 2px 8px rgba(0,0,0,0.4)";
+
+    botaoFlutuante.addEventListener("click", alternarDetector);
+
+    document.body.appendChild(botaoFlutuante);
+    atualizarBotao();
+  }
+
+
+  // ---------- ATALHO DE TECLADO (LIGAR/DESLIGAR) ----------
+
+  function configurarHotkey() {
+    document.addEventListener("keydown", function (evento) {
+      const teclaBate = evento.key.toLowerCase() === HOTKEY_TECLA.toLowerCase();
+      const ctrlBate = evento.ctrlKey === HOTKEY_CTRL;
+      const shiftBate = evento.shiftKey === HOTKEY_SHIFT;
+
+      if (teclaBate && ctrlBate && shiftBate) {
+        alternarDetector();
+      }
+    });
+  }
+
+
   // ---------- INICIALIZAÇÃO ----------
 
   function iniciar() {
+    configurarHotkey();
+    criarBotaoFlutuante();
+
     // Tenta detectar o nome já a partir de mensagens que já estavam
     // na tela antes do script iniciar.
     document.querySelectorAll(".chat-message").forEach(tentarDetectarNome);
