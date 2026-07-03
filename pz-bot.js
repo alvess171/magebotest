@@ -1699,6 +1699,54 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     start();
   }
 
+  // ── VIGIA DE RECONEXÃO (interno ao módulo panic) ────────────
+  // Se a conexão cair e voltar, garante que o panic runner (que
+  // cuida do "auto return after flee") volte a rodar sozinho.
+  const reconnectWatcherState = {
+    estavaConectado: null,
+    timerId: null,
+  };
+
+  function estaConectadoPanic() {
+    return !!window.gameClient?.networkManager?.state?.__wasConnected;
+  }
+
+  function verificarReconexaoPanic() {
+    const conectadoAgora = estaConectadoPanic();
+
+    if (reconnectWatcherState.estavaConectado === null) {
+      reconnectWatcherState.estavaConectado = conectadoAgora;
+      return;
+    }
+
+    if (!reconnectWatcherState.estavaConectado && conectadoAgora) {
+      bot.log("panic reconnect detected");
+      window.setTimeout(() => {
+        if (!state.running && shouldRun()) {
+          syncRunningState();
+          bot.log("panic runner reativado após reconexão");
+        }
+      }, 2000);
+    }
+
+    reconnectWatcherState.estavaConectado = conectadoAgora;
+  }
+
+  function startReconnectWatcherPanic() {
+    if (reconnectWatcherState.timerId != null) return;
+    reconnectWatcherState.timerId = window.setInterval(verificarReconexaoPanic, 1000);
+  }
+
+  function stopReconnectWatcherPanic() {
+    if (reconnectWatcherState.timerId != null) {
+      window.clearInterval(reconnectWatcherState.timerId);
+      reconnectWatcherState.timerId = null;
+    }
+  }
+
+  startReconnectWatcherPanic();
+  bot.addCleanup(stopReconnectWatcherPanic);
+
   bot.panic = {
     start,
     stop,
@@ -9595,8 +9643,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 // Minibia — Reativador automático de módulos após reconexão
 // ============================================================
 // Fica de olho no status da conexão com o servidor. Quando detecta
-// que caiu e depois voltou, reativa o cave bot e o panic runner
-// (que cuida do "auto return after flee") automaticamente.
+// que caiu e depois voltou, reativa o cave bot automaticamente.
+// (O panic runner agora tem seu próprio vigia de reconexão embutido
+// no módulo, então não precisa ser cuidado aqui também.)
 // ============================================================
 
 (function () {
@@ -9606,7 +9655,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   let estavaConectado = null; // null = ainda não sabemos o estado inicial
   let caveEstavaAtivoAntesDeCair = false;
-  let panicEstavaAtivoAntesDeCair = false;
 
   function estaConectado() {
     // __wasConnected reflete se a última verificação de rede teve sucesso.
@@ -9625,17 +9673,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     // Detectou queda de conexão
     if (estavaConectado && !conectadoAgora) {
       caveEstavaAtivoAntesDeCair = !!window.minibiaBot?.cave?.status?.().running;
-      panicEstavaAtivoAntesDeCair = !!window.minibiaBot?.panic?.status?.().running;
       console.log(
-        "%c[Reconnect-Auto] Conexão caiu. Cave ativo: " + caveEstavaAtivoAntesDeCair +
-        " | Panic (auto return) ativo: " + panicEstavaAtivoAntesDeCair,
+        "%c[Cave-Auto] Conexão caiu. Cave ativo: " + caveEstavaAtivoAntesDeCair,
         "color: orange;"
       );
     }
 
     // Detectou volta da conexão
     if (!estavaConectado && conectadoAgora) {
-      console.log("%c[Reconnect-Auto] Conexão voltou.", "color: lightgreen;");
+      console.log("%c[Cave-Auto] Conexão voltou.", "color: lightgreen;");
 
       setTimeout(function () {
         // Reativa o cave bot, se estava ativo antes de cair
@@ -9644,19 +9690,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           if (!caveJaRodando && window.minibiaBot?.cave?.start) {
             const iniciou = window.minibiaBot.cave.start();
             console.log(
-              "%c[Reconnect-Auto] Cave bot reativado: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
-              "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
-            );
-          }
-        }
-
-        // Reativa o panic runner (que cuida do "auto return after flee")
-        if (panicEstavaAtivoAntesDeCair) {
-          const panicJaRodando = window.minibiaBot?.panic?.status?.().running;
-          if (!panicJaRodando && window.minibiaBot?.panic?.start) {
-            const iniciou = window.minibiaBot.panic.start();
-            console.log(
-              "%c[Reconnect-Auto] Panic runner reativado: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
+              "%c[Cave-Auto] Cave bot reativado: " + (iniciou ? "sucesso ✅" : "falhou ⚠️"),
               "color: " + (iniciou ? "lightgreen" : "red") + "; font-weight: bold;"
             );
           }
@@ -9668,6 +9702,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
 
   setInterval(verificarConexao, INTERVALO_MS);
-  console.log("[Reconnect-Auto] Vigia de reconexão ativo (cave + panic).");
+  console.log("[Cave-Auto] Vigia de reconexão ativo.");
 
 })();
