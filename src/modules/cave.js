@@ -1436,54 +1436,36 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   if (config.enabled && route.length) start();
 
   // ── VIGIA DE RECONEXÃO ───────────────────────────────────────
-  // Toda vez que a conexão cair e voltar, ativa o cave bot de novo
-  // (sempre, independente de estar rodando ou não antes de cair) —
-  // desde que já exista uma rota salva.
-  const reconnectWatcherState = {
-    estavaConectado: null,
-    timerId: null,
-  };
+  // Em vez de tentar adivinhar pelo estado interno da conexão,
+  // captura direto a mensagem que o jogo já escreve no console
+  // quando reconecta de verdade ("Reconnected to the gameserver.").
+  if (!window.__caveReconnectHookInstalled) {
+    window.__caveReconnectHookInstalled = true;
+    const originalConsoleLog = console.log.bind(console);
 
-  function estaConectadoCave() {
-    return !!window.gameClient?.networkManager?.state?.__wasConnected;
-  }
-
-  function verificarReconexaoCave() {
-    const conectadoAgora = estaConectadoCave();
-
-    if (reconnectWatcherState.estavaConectado === null) {
-      reconnectWatcherState.estavaConectado = conectadoAgora;
-      return;
-    }
-
-    if (!reconnectWatcherState.estavaConectado && conectadoAgora) {
-      bot.log("cave reconnect detected");
-      window.setTimeout(() => {
-        if (route.length) {
-          stop({ persistEnabled: false });
-          const iniciou = start();
-          bot.log("cave bot desativado e reativado após reconexão", { sucesso: iniciou });
+    console.log = function (...args) {
+      originalConsoleLog(...args);
+      try {
+        const texto = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
+        if (texto.includes("Reconnected to the gameserver")) {
+          window.dispatchEvent(new CustomEvent("minibia:reconnected"));
         }
-      }, 2000);
-    }
-
-    reconnectWatcherState.estavaConectado = conectadoAgora;
+      } catch (e) {
+        // silencioso — não deixa o hook quebrar o console original
+      }
+    };
   }
 
-  function startReconnectWatcherCave() {
-    if (reconnectWatcherState.timerId != null) return;
-    reconnectWatcherState.timerId = window.setInterval(verificarReconexaoCave, 1000);
-  }
-
-  function stopReconnectWatcherCave() {
-    if (reconnectWatcherState.timerId != null) {
-      window.clearInterval(reconnectWatcherState.timerId);
-      reconnectWatcherState.timerId = null;
-    }
-  }
-
-  startReconnectWatcherCave();
-  bot.addCleanup(stopReconnectWatcherCave);
+  window.addEventListener("minibia:reconnected", function () {
+    bot.log("cave reconnect detected (via console hook)");
+    window.setTimeout(() => {
+      if (route.length) {
+        stop({ persistEnabled: false });
+        const iniciou = start();
+        bot.log("cave bot desativado e reativado após reconexão", { sucesso: iniciou });
+      }
+    }, 2000);
+  });
 
   bot.cave = {
     start, stop, status, updateConfig, config,
