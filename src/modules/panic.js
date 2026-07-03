@@ -584,6 +584,55 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     start();
   }
 
+  // ── VIGIA DE RECONEXÃO ───────────────────────────────────────
+  // Fica de olho no status da conexão com o servidor. Se cair e
+  // voltar, garante que o panic runner (que cuida do "auto return
+  // after flee") volte a rodar, caso tenha parado por algum motivo.
+  const reconnectWatcherState = {
+    estavaConectado: null,
+    timerId: null,
+  };
+
+  function estaConectado() {
+    return !!window.gameClient?.networkManager?.state?.__wasConnected;
+  }
+
+  function verificarReconexao() {
+    const conectadoAgora = estaConectado();
+
+    if (reconnectWatcherState.estavaConectado === null) {
+      reconnectWatcherState.estavaConectado = conectadoAgora;
+      return;
+    }
+
+    if (!reconnectWatcherState.estavaConectado && conectadoAgora) {
+      bot.log("panic reconnect detected");
+      window.setTimeout(() => {
+        if (!state.running && shouldRun()) {
+          syncRunningState();
+          bot.log("panic runner reativado após reconexão");
+        }
+      }, 2000);
+    }
+
+    reconnectWatcherState.estavaConectado = conectadoAgora;
+  }
+
+  function startReconnectWatcher() {
+    if (reconnectWatcherState.timerId != null) return;
+    reconnectWatcherState.timerId = window.setInterval(verificarReconexao, 1000);
+  }
+
+  function stopReconnectWatcher() {
+    if (reconnectWatcherState.timerId != null) {
+      window.clearInterval(reconnectWatcherState.timerId);
+      reconnectWatcherState.timerId = null;
+    }
+  }
+
+  startReconnectWatcher();
+  bot.addCleanup(stopReconnectWatcher);
+
   bot.panic = {
     start,
     stop,
