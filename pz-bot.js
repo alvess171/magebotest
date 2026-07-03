@@ -1699,37 +1699,6 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     start();
   }
 
-  // ── VIGIA DE RECONEXÃO (interno ao módulo panic) ────────────
-  // Captura direto a mensagem que o jogo já escreve no console
-  // quando reconecta de verdade ("Reconnected to the gameserver.").
-  // Reaproveita o mesmo hook do console que o cave já instala.
-  if (!window.__caveReconnectHookInstalled) {
-    window.__caveReconnectHookInstalled = true;
-    const originalConsoleLogPanic = console.log.bind(console);
-
-    console.log = function (...args) {
-      originalConsoleLogPanic(...args);
-      try {
-        const texto = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
-        if (texto.includes("Reconnected to the gameserver")) {
-          window.dispatchEvent(new CustomEvent("minibia:reconnected"));
-        }
-      } catch (e) {
-        // silencioso — não deixa o hook quebrar o console original
-      }
-    };
-  }
-
-  window.addEventListener("minibia:reconnected", function () {
-    bot.log("panic reconnect detected (via console hook)");
-    window.setTimeout(() => {
-      if (!state.running && shouldRun()) {
-        syncRunningState();
-        bot.log("panic runner reativado após reconexão");
-      }
-    }, 2000);
-  });
-
   bot.panic = {
     start,
     stop,
@@ -5188,37 +5157,6 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   bot.addCleanup(uninstallHotkey);
 
   if (config.enabled && route.length) start();
-
-  // ── VIGIA DE RECONEXÃO (interno ao módulo cave) ─────────────
-  // Captura direto a mensagem que o jogo já escreve no console
-  // quando reconecta de verdade ("Reconnected to the gameserver.").
-  if (!window.__caveReconnectHookInstalled) {
-    window.__caveReconnectHookInstalled = true;
-    const originalConsoleLogCave = console.log.bind(console);
-
-    console.log = function (...args) {
-      originalConsoleLogCave(...args);
-      try {
-        const texto = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
-        if (texto.includes("Reconnected to the gameserver")) {
-          window.dispatchEvent(new CustomEvent("minibia:reconnected"));
-        }
-      } catch (e) {
-        // silencioso — não deixa o hook quebrar o console original
-      }
-    };
-  }
-
-  window.addEventListener("minibia:reconnected", function () {
-    bot.log("cave reconnect detected (via console hook)");
-    window.setTimeout(() => {
-      if (route.length) {
-        stop({ persistEnabled: false });
-        const iniciou = start();
-        bot.log("cave bot desativado e reativado após reconexão", { sucesso: iniciou });
-      }
-    }, 2000);
-  });
 
   bot.cave = {
     start, stop, status, updateConfig, config,
