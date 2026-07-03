@@ -440,6 +440,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-actions-inline-two"><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-new">New</button><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-delete">Delete</button></div>
               <div class="mb-actions-inline-two"><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-export">Export</button><button type="button" class="mb-small-button" id="minibia-bot-cave-preset-import">Import</button></div>
               <div class="mb-actions-inline-two"><button type="button" class="mb-small-button" id="minibia-bot-cave-record">Record Spot</button><button type="button" class="mb-small-button" id="minibia-bot-cave-add-delay">Add Delay</button></div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-auto-record" /><span>Auto Record (grava enquanto anda)</span></label>
+              <span class="mb-small-note" id="minibia-bot-cave-auto-record-status">Auto Record: desligado</span>
               <button type="button" class="mb-small-button mb-btn-full" id="minibia-bot-cave-remove-last">Remove Last Waypoint</button>
               <span class="mb-small-note" id="minibia-bot-cave-closest">Closest: no waypoints</span>
               <span class="mb-small-note" id="minibia-bot-cave-transition-status">Transitions: none</span>
@@ -782,6 +784,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.querySelector("#minibia-bot-cave-record")?.addEventListener("click",()=>{bot.cave.addWaypointCurrentSpot();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();});
     panel.querySelector("#minibia-bot-cave-add-delay")?.addEventListener("click",()=>{const r=window.prompt("Delay in seconds:","90");if(r==null)return;const s=Math.max(1,Math.trunc(Number(r)||0));if(!Number.isFinite(s)||s<=0){window.alert("Invalid number.");return;}bot.cave.addDelay(s);refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
     panel.querySelector("#minibia-bot-cave-remove-last")?.addEventListener("click",()=>{bot.cave.removeLastWaypoint();refreshCavePresetControls();refreshCaveStatus();refreshCaveClosestStatus();});
+    const caveAutoRecordI=panel.querySelector("#minibia-bot-cave-auto-record");
+    const caveAutoRecordStatusL=panel.querySelector("#minibia-bot-cave-auto-record-status");
+    function refreshCaveAutoRecordStatus(){const rec=!!bot.cave?.isAutoRecording?.();if(caveAutoRecordI)caveAutoRecordI.checked=rec;if(caveAutoRecordStatusL)caveAutoRecordStatusL.textContent=rec?"Auto Record: gravando enquanto anda...":"Auto Record: desligado";}
+    if(caveAutoRecordI){caveAutoRecordI.addEventListener("change",()=>{if(caveAutoRecordI.checked)bot.cave.startAutoRecord();else bot.cave.stopAutoRecord();refreshCaveAutoRecordStatus();});}
     const cpucI=panel.querySelector("#minibia-bot-cave-pause-until-clear");
     if(cpucI){cpucI.checked=bot.cave?.config?.pauseUntilClear!==false;cpucI.addEventListener("change",()=>{bot.cave.updateConfig({pauseUntilClear:cpucI.checked});refreshCaveStatus();});}
     const caveStrictOrderI=panel.querySelector("#minibia-bot-cave-strict-order");
@@ -903,7 +909,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     renderGameMasterNames();renderTrustedNames();renderAttackTargetNames();
     refreshRuneStatus();refreshAutoHealStatus();refreshAutoInvisibleStatus();
     refreshAutoMagicShieldStatus();refreshAutoAttackStatus();refreshAutoEatStatus();
-    refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();
+    refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();refreshCaveAutoRecordStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
     refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
@@ -912,7 +918,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
     const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();refreshChatStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
-    const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
+    const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();refreshCaveAutoRecordStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
   bot.ui = {
