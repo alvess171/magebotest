@@ -19,6 +19,7 @@ cat \
   src/modules/autostack.js \
   src/modules/auto-ring-by-cap.js \
   src/modules/haste.js \
+  src/modules/Chat \
   src/modules/profiles.js \
   src/ui/panel.js \
   src/main.js \
