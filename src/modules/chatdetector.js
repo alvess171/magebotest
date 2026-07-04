@@ -5,12 +5,13 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
   const defaultConfig = {
     enabled: false,
-    alarmeEm: "qualquer", // "qualquer" | "mencao"
+    alarmeEm: "qualquer", // "qualquer" | "mencao" | "vigiados"
     volume: 0.3,
     tomHz: 880,
     qtdBips: 3,
     canaisPermitidos: ["Default", "Console"],
     ignorarSeContiver: ["hitpoints", "attack"],
+    termosVigiados: [],
     pollIntervalMs: 500,
   };
 
@@ -68,17 +69,26 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
     const souEu = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
     const fuiMencionado = state.playerName && !souEu && mensagem.toLowerCase().includes(state.playerName.toLowerCase());
+    const bateuVigiado = !souEu && (config.termosVigiados || []).some((termo) =>
+      mensagem.toLowerCase().includes(termo.toLowerCase())
+    );
 
     const deveAlarmar =
       !ehHistorico && (
         config.alarmeEm === "qualquer" ? !souEu :
         config.alarmeEm === "mencao" ? fuiMencionado :
+        config.alarmeEm === "vigiados" ? bateuVigiado :
         false
       );
 
     const prefixo = "[" + nomeCanal + "]";
 
-    if (fuiMencionado) {
+    if (bateuVigiado) {
+      console.log(
+        "%c" + prefixo + " [VIGIADO] " + remetente + ": " + mensagem,
+        "color: #ff5555; font-weight: bold;"
+      );
+    } else if (fuiMencionado) {
       console.log(
         "%c" + prefixo + " [MENÇÃO] " + remetente + ": " + mensagem,
         "color: orange; font-weight: bold;"
@@ -186,6 +196,23 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     return true;
   }
 
+  function addWatched(termo) {
+    const t = (termo || "").trim();
+    if (!t) return false;
+    if ((config.termosVigiados || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
+      return false;
+    }
+    config.termosVigiados = [...(config.termosVigiados || []), t];
+    persistConfig();
+    return true;
+  }
+
+  function removeWatched(termo) {
+    config.termosVigiados = (config.termosVigiados || []).filter((x) => x !== termo);
+    persistConfig();
+    return true;
+  }
+
   function status() {
     return {
       running: state.running,
@@ -205,6 +232,8 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     updateConfig,
     addIgnored,
     removeIgnored,
+    addWatched,
+    removeWatched,
   };
 
   bot.addCleanup(() => stop({ persistEnabled: false }));
