@@ -8238,7 +8238,16 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     const remetente = (msgObj.name || "Sistema").trim();
     const mensagem = msgObj.message || "";
 
-    if (deveIgnorar(mensagem, remetente)) return;
+    const souEuPreCheck = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
+    const bateuVigiadoPreCheck = !souEuPreCheck && (config.termosVigiados || []).some((termo) =>
+      mensagem.toLowerCase().includes(termo.toLowerCase())
+    );
+
+    // Termos vigiados têm prioridade sobre a lista de ignorados — se a
+    // mensagem bater com um termo vigiado, ela nunca é bloqueada pelo
+    // filtro de ignorados (ex: "human" deve passar mesmo numa mensagem
+    // de combate que também contenha "attack").
+    if (!bateuVigiadoPreCheck && deveIgnorar(mensagem, remetente)) return;
 
     const souEu = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
     const fuiMencionado = state.playerName && !souEu && mensagem.toLowerCase().includes(state.playerName.toLowerCase());
