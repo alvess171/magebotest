@@ -8171,7 +8171,7 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 
 
-window.__minibiaBotBundle.installChatDetectorModule = function installChatDetectorModule(bot) {
+window.__minibiaBotBundle.installChatdetectorModule = function installChatdetectorModule(bot) {
   const configStorageKey = "minibiaBot.chatDetector.config";
 
   const defaultConfig = {
@@ -8369,7 +8369,7 @@ window.__minibiaBotBundle.installChatDetectorModule = function installChatDetect
     start();
   }
 
-  bot.chatDetector = {
+  bot.Chatdetector = {
     start,
     stop,
     status,
@@ -9259,27 +9259,27 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const chatIgnoreAddB=panel.querySelector("#mb-chat-ignore-add");
 
     function refreshChatStatus() {
-      const s=bot.chatDetector?.status?.();
+      const s=bot.Chatdetector?.status?.();
       if(chatEI) chatEI.checked=!!s?.running;
       if(chatStatusL) chatStatusL.textContent=s?.running?`Status: ativo • jogador: ${s.playerName||"?"}`:"Status: parado";
       if(chatAlarmeSel) chatAlarmeSel.value=s?.config?.alarmeEm||"qualquer";
     }
     function renderChatIgnoreList() {
       const list=panel.querySelector("#mb-chat-ignore-list"); if(!list) return;
-      const termos=bot.chatDetector?.status?.()?.config?.ignorarSeContiver||[];
+      const termos=bot.Chatdetector?.status?.()?.config?.ignorarSeContiver||[];
       list.innerHTML="";
       if(!termos.length){const e=document.createElement("div");e.className="mb-small-note";e.textContent="Nenhum termo ignorado.";list.appendChild(e);return;}
       termos.forEach((termo)=>{
         const row=document.createElement("div"); row.className="mb-list-row";
         const label=document.createElement("span"); label.textContent=termo;
         const btn=document.createElement("button"); btn.type="button"; btn.className="mb-small-button"; btn.textContent="Remove";
-        btn.addEventListener("click",()=>{bot.chatDetector?.removeIgnored?.(termo);renderChatIgnoreList();});
+        btn.addEventListener("click",()=>{bot.Chatdetector?.removeIgnored?.(termo);renderChatIgnoreList();});
         row.appendChild(label); row.appendChild(btn); list.appendChild(row);
       });
     }
-    if(chatEI){chatEI.addEventListener("change",()=>{if(chatEI.checked){if(!bot.chatDetector?.start?.())chatEI.checked=false;}else bot.chatDetector?.stop?.();refreshChatStatus();});}
-    chatAlarmeSel?.addEventListener("change",()=>{bot.chatDetector?.updateConfig?.({alarmeEm:chatAlarmeSel.value});});
-    function addChatIgnore(){const v=chatIgnoreInput?.value?.trim()||"";if(!v)return;bot.chatDetector?.addIgnored?.(v);if(chatIgnoreInput)chatIgnoreInput.value="";renderChatIgnoreList();}
+    if(chatEI){chatEI.addEventListener("change",()=>{if(chatEI.checked){if(!bot.Chatdetector?.start?.())chatEI.checked=false;}else bot.Chatdetector?.stop?.();refreshChatStatus();});}
+    chatAlarmeSel?.addEventListener("change",()=>{bot.Chatdetector?.updateConfig?.({alarmeEm:chatAlarmeSel.value});});
+    function addChatIgnore(){const v=chatIgnoreInput?.value?.trim()||"";if(!v)return;bot.Chatdetector?.addIgnored?.(v);if(chatIgnoreInput)chatIgnoreInput.value="";renderChatIgnoreList();}
     chatIgnoreAddB?.addEventListener("click",addChatIgnore);
     chatIgnoreInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addChatIgnore();}});
 
@@ -9388,7 +9388,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installDistanceAttackModule(bot);
     currentBundle.installMeleePositionModule(bot);
     currentBundle.installProfilesModule(bot);
-    currentBundle.installChatDetectorModule(bot);
+    currentBundle.installChatdetectorModule(bot);
     currentBundle.installPanel(bot);
 
     bot.ui.inject();
