@@ -533,9 +533,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <select id="mb-chat-alarme-em">
                   <option value="qualquer">Qualquer mensagem</option>
                   <option value="mencao">Só quando me mencionam</option>
+                  <option value="vigiados">Só termos vigiados (lista abaixo)</option>
                 </select>
               </div>
               <span class="mb-note">Canais monitorados: Default e Console.</span>
+            </div>
+          </div>
+          <div class="mb-group"><span class="mb-group-title">Termos Vigiados</span>
+            <div class="mb-stack">
+              <div class="mb-row-three">
+                <span class="mb-field-label">Novo termo</span>
+                <input type="text" id="mb-chat-watch-input" placeholder="ex: drop raro" />
+                <button type="button" class="mb-small-button" id="mb-chat-watch-add">Add</button>
+              </div>
+              <div class="mb-list" id="mb-chat-watch-list"></div>
+              <span class="mb-note">Só usado quando "Tocar alarme em" está em "Só termos vigiados".</span>
             </div>
           </div>
           <div class="mb-group"><span class="mb-group-title">Termos Ignorados</span>
@@ -904,6 +916,25 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     chatIgnoreAddB?.addEventListener("click",addChatIgnore);
     chatIgnoreInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addChatIgnore();}});
 
+    const chatWatchInput=panel.querySelector("#mb-chat-watch-input");
+    const chatWatchAddB=panel.querySelector("#mb-chat-watch-add");
+    function renderChatWatchList() {
+      const list=panel.querySelector("#mb-chat-watch-list"); if(!list) return;
+      const termos=bot.Chatdetector?.status?.()?.config?.termosVigiados||[];
+      list.innerHTML="";
+      if(!termos.length){const e=document.createElement("div");e.className="mb-small-note";e.textContent="Nenhum termo vigiado.";list.appendChild(e);return;}
+      termos.forEach((termo)=>{
+        const row=document.createElement("div"); row.className="mb-list-row";
+        const label=document.createElement("span"); label.textContent=termo;
+        const btn=document.createElement("button"); btn.type="button"; btn.className="mb-small-button"; btn.textContent="Remove";
+        btn.addEventListener("click",()=>{bot.Chatdetector?.removeWatched?.(termo);renderChatWatchList();});
+        row.appendChild(label); row.appendChild(btn); list.appendChild(row);
+      });
+    }
+    function addChatWatch(){const v=chatWatchInput?.value?.trim()||"";if(!v)return;bot.Chatdetector?.addWatched?.(v);if(chatWatchInput)chatWatchInput.value="";renderChatWatchList();}
+    chatWatchAddB?.addEventListener("click",addChatWatch);
+    chatWatchInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addChatWatch();}});
+
     // ── Refresh inicial ───────────────────────────────────────
     refreshHomeLabel();refreshPanicStatus();refreshXrayStatus();
     renderGameMasterNames();renderTrustedNames();renderAttackTargetNames();
@@ -913,7 +944,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
     refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
-    refreshDistanceAttackStatus();refreshChatStatus();renderChatIgnoreList();
+    refreshDistanceAttackStatus();refreshChatStatus();renderChatIgnoreList();renderChatWatchList();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
