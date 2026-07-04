@@ -27,7 +27,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     running: false,
     timerId: null,
     playerName: null,
-    ultimaContagemPorCanal: new Map(),
+    mensagensProcessadas: new WeakSet(),
   };
 
   function tocarAlarme() {
@@ -146,15 +146,16 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
       }
 
       const contents = channel.__contents || [];
-      const contagemAnterior = state.ultimaContagemPorCanal.get(indice) || 0;
 
-      if (contents.length > contagemAnterior) {
-        for (let i = contagemAnterior; i < contents.length; i++) {
-          processarMensagem(contents[i], nomeCanal, ehVerificacaoInicial);
-        }
-      }
-
-      state.ultimaContagemPorCanal.set(indice, contents.length);
+      // Em vez de comparar o TAMANHO da lista (que quebra se o canal
+      // descartar mensagens antigas ao atingir um limite), marca cada
+      // mensagem individualmente como "já vista" — assim funciona
+      // mesmo que o array não cresça mais.
+      contents.forEach((msgObj) => {
+        if (state.mensagensProcessadas.has(msgObj)) return;
+        state.mensagensProcessadas.add(msgObj);
+        processarMensagem(msgObj, nomeCanal, ehVerificacaoInicial);
+      });
     });
   }
 
@@ -173,7 +174,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     }
 
     state.playerName = (window.gameClient?.player?.name || "").trim() || null;
-    state.ultimaContagemPorCanal.clear();
+    state.mensagensProcessadas = new WeakSet();
 
     // Primeira passada: marca tudo que já existe como "histórico"
     // (não dispara alarme), só estabelece o ponto de partida.
