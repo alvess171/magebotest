@@ -8176,7 +8176,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
   const defaultConfig = {
     enabled: false,
-    alarmeEm: "qualquer", // "qualquer" | "mencao" | "vigiados"
+    alarmarQualquer: true,   // toca alarme em qualquer mensagem de outra pessoa
+    alarmarMencao: false,    // toca alarme quando te mencionam
+    alarmarVigiados: false,  // toca alarme quando bate um termo vigiado
     volume: 0.3,
     tomHz: 880,
     qtdBips: 3,
@@ -8246,10 +8248,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
     const deveAlarmar =
       !ehHistorico && (
-        config.alarmeEm === "qualquer" ? !souEu :
-        config.alarmeEm === "mencao" ? fuiMencionado :
-        config.alarmeEm === "vigiados" ? bateuVigiado :
-        false
+        (config.alarmarQualquer && !souEu) ||
+        (config.alarmarMencao && fuiMencionado) ||
+        (config.alarmarVigiados && bateuVigiado)
       );
 
     const prefixo = "[" + nomeCanal + "]";
@@ -8938,11 +8939,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <span class="mb-small-note" id="mb-chat-status">Status: parado</span>
               <div class="mb-field">
                 <span class="mb-field-label">Tocar alarme em</span>
-                <select id="mb-chat-alarme-em">
-                  <option value="qualquer">Qualquer mensagem</option>
-                  <option value="mencao">Só quando me mencionam</option>
-                  <option value="vigiados">Só termos vigiados (lista abaixo)</option>
-                </select>
+                <label class="mb-toggle"><input type="checkbox" id="mb-chat-alarme-qualquer" /><span>Qualquer mensagem</span></label>
+                <label class="mb-toggle"><input type="checkbox" id="mb-chat-alarme-mencao" /><span>Quando me mencionam</span></label>
+                <label class="mb-toggle"><input type="checkbox" id="mb-chat-alarme-vigiados" /><span>Termos vigiados (lista abaixo)</span></label>
+                <span class="mb-note">Pode marcar mais de um ao mesmo tempo.</span>
               </div>
               <span class="mb-note">Canais monitorados: Default e Console.</span>
             </div>
@@ -9295,7 +9295,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     // ── Chat Detector ─────────────────────────────────────────
     const chatEI=panel.querySelector("#mb-chat-enabled");
     const chatStatusL=panel.querySelector("#mb-chat-status");
-    const chatAlarmeSel=panel.querySelector("#mb-chat-alarme-em");
+    const chatAlarmeQualquerI=panel.querySelector("#mb-chat-alarme-qualquer");
+    const chatAlarmeMencaoI=panel.querySelector("#mb-chat-alarme-mencao");
+    const chatAlarmeVigiadosI=panel.querySelector("#mb-chat-alarme-vigiados");
     const chatIgnoreInput=panel.querySelector("#mb-chat-ignore-input");
     const chatIgnoreAddB=panel.querySelector("#mb-chat-ignore-add");
 
@@ -9303,7 +9305,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       const s=bot.Chatdetector?.status?.();
       if(chatEI) chatEI.checked=!!s?.running;
       if(chatStatusL) chatStatusL.textContent=s?.running?`Status: ativo • jogador: ${s.playerName||"?"}`:"Status: parado";
-      if(chatAlarmeSel) chatAlarmeSel.value=s?.config?.alarmeEm||"qualquer";
+      if(chatAlarmeQualquerI) chatAlarmeQualquerI.checked=s?.config?.alarmarQualquer!==false;
+      if(chatAlarmeMencaoI) chatAlarmeMencaoI.checked=!!s?.config?.alarmarMencao;
+      if(chatAlarmeVigiadosI) chatAlarmeVigiadosI.checked=!!s?.config?.alarmarVigiados;
     }
     function renderChatIgnoreList() {
       const list=panel.querySelector("#mb-chat-ignore-list"); if(!list) return;
@@ -9319,7 +9323,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
     if(chatEI){chatEI.addEventListener("change",()=>{if(chatEI.checked){if(!bot.Chatdetector?.start?.())chatEI.checked=false;}else bot.Chatdetector?.stop?.();refreshChatStatus();});}
-    chatAlarmeSel?.addEventListener("change",()=>{bot.Chatdetector?.updateConfig?.({alarmeEm:chatAlarmeSel.value});});
+    chatAlarmeQualquerI?.addEventListener("change",()=>{bot.Chatdetector?.updateConfig?.({alarmarQualquer:chatAlarmeQualquerI.checked});});
+    chatAlarmeMencaoI?.addEventListener("change",()=>{bot.Chatdetector?.updateConfig?.({alarmarMencao:chatAlarmeMencaoI.checked});});
+    chatAlarmeVigiadosI?.addEventListener("change",()=>{bot.Chatdetector?.updateConfig?.({alarmarVigiados:chatAlarmeVigiadosI.checked});});
     function addChatIgnore(){const v=chatIgnoreInput?.value?.trim()||"";if(!v)return;bot.Chatdetector?.addIgnored?.(v);if(chatIgnoreInput)chatIgnoreInput.value="";renderChatIgnoreList();}
     chatIgnoreAddB?.addEventListener("click",addChatIgnore);
     chatIgnoreInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addChatIgnore();}});
