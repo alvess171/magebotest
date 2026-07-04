@@ -5,7 +5,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
   const defaultConfig = {
     enabled: false,
-    alarmeEm: "qualquer", // "qualquer" | "mencao" | "vigiados"
+    alarmarQualquer: true,   // toca alarme em qualquer mensagem de outra pessoa
+    alarmarMencao: false,    // toca alarme quando te mencionam
+    alarmarVigiados: false,  // toca alarme quando bate um termo vigiado
     volume: 0.3,
     tomHz: 880,
     qtdBips: 3,
@@ -75,10 +77,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
     const deveAlarmar =
       !ehHistorico && (
-        config.alarmeEm === "qualquer" ? !souEu :
-        config.alarmeEm === "mencao" ? fuiMencionado :
-        config.alarmeEm === "vigiados" ? bateuVigiado :
-        false
+        (config.alarmarQualquer && !souEu) ||
+        (config.alarmarMencao && fuiMencionado) ||
+        (config.alarmarVigiados && bateuVigiado)
       );
 
     const prefixo = "[" + nomeCanal + "]";
