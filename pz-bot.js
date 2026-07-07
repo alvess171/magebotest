@@ -2,7 +2,7 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.createBot = function createBot() {
   const cleanups = [];
-  const defaultAlarmAudioSrc = "https://upload.wikimedia.org/wikipedia/commons/transcoded/3/3f/ACA_Allertor_125_video.ogv/ACA_Allertor_125_video.ogv.480p.vp9.webm";
+  const defaultAlarmAudioSrc = "https://upload.wikimedia.org/wikipedia/commons/7/78/Cell_Broadcast_Alert_Tone.oga";
   const alarmAudioSrcStorageKey = "minibiaBot.audio.alarmSrc";
   const recentSentChats = [];
   const reconnectButtonSelectors = [
@@ -468,6 +468,7 @@ window.__minibiaBotBundle.createBot = function createBot() {
     },
   };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
@@ -663,6 +664,7 @@ window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
   bot.clearHomePz = clearHomePz;
   bot.goToHomePz = goToHomePz;
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
@@ -1110,6 +1112,608 @@ window.__minibiaBotBundle.installXrayModule = function installXrayModule(bot) {
   }
   bot.addCleanup(stopOverlay);
 };
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) {
+  const configStorageKey = "minibiaBot.panic.config";
+  const state = {
+    running: false,
+    timerId: null,
+    lastHealth: null,
+    lastTriggerAt: 0,
+    lastDamageEventKey: null,
+    pendingReturnOrigin: null,
+    pendingReturnModules: null,
+    returnNotBeforeAt: 0,
+    lastThreatAt: 0,
+    lastReturnAttemptAt: 0,
+  };
+
+  const config = Object.assign(
+    {
+      tickMs: 200,
+      triggerCooldownMs: 500,
+      returnToOriginEnabled: false,
+      returnDelayMs: 4500,
+      returnDelayJitterMs: 4500,
+      returnRetryCooldownMs: 100,
+      unknownPlayerEnabled: false,
+      healthLossEnabled: false,
+      trustedNames: [],
+      gameMasterNames: [],
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  function persistConfig() {
+    bot.storage.set(configStorageKey, { ...config });
+  }
+
+  function normalizeName(name) {
+    return String(name || "").trim().toLowerCase();
+  }
+
+  function normalizeDelayMs(value, fallback = 0) {
+    const next = Math.trunc(Number(value));
+    return Number.isFinite(next) ? Math.max(0, next) : fallback;
+  }
+
+  function normalizePosition(position) {
+    const x = Number(position?.x);
+    const y = Number(position?.y);
+    const z = Number(position?.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      return null;
+    }
+
+    return { x, y, z };
+  }
+
+  function isSamePosition(left, right) {
+    return !!left && !!right && left.x === right.x && left.y === right.y && left.z === right.z;
+  }
+
+  function getTrustedNames() {
+    return Array.from(
+      new Set(
+        (config.trustedNames || [])
+          .map((name) => normalizeName(name))
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function getGameMasterNames() {
+    return Array.from(
+      new Set(
+        (config.gameMasterNames || [])
+          .map((name) => normalizeName(name))
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function getVisiblePlayers() {
+    const me = bot.getPlayerPosition();
+    const players = bot.xray?.getVisiblePlayers?.() || [];
+    if (!me) {
+      return players;
+    }
+
+    return players.filter((creature) => {
+      const z = Number(creature?.__position?.z);
+      return Number.isFinite(z) && Math.abs(z - me.z) <= 1;
+    });
+  }
+
+  function getUnknownVisiblePlayers() {
+    const trusted = new Set(getTrustedNames());
+
+    return getVisiblePlayers().filter((creature) => {
+      const name = normalizeName(creature?.name);
+      return !!name && !trusted.has(name);
+    });
+  }
+
+  function getTrustedVisiblePlayers() {
+    const trusted = new Set(getTrustedNames());
+
+    return getVisiblePlayers().filter((creature) => {
+      const name = normalizeName(creature?.name);
+      return !!name && trusted.has(name);
+    });
+  }
+
+  function getVisibleGameMasters() {
+    const gameMasters = new Set(getGameMasterNames());
+
+    return getVisiblePlayers().filter((creature) => {
+      const name = normalizeName(creature?.name);
+      return !!name && gameMasters.has(name);
+    });
+  }
+
+  function getRecentChannelMessages() {
+    return (window.gameClient?.interface?.channelManager?.channels || []).flatMap((channel) =>
+      (channel?.__contents || []).map((entry) => ({
+        channelName: channel?.name || null,
+        message: String(entry?.message || ""),
+        time: entry?.__time || null,
+      }))
+    );
+  }
+
+  function parseDamageMessage(entry) {
+    const match = entry.message.match(
+      /^You lose\s+(\d+)\s+hitpoints\s+due to an attack by\s+(.+?)\.$/i
+    );
+
+    if (!match) {
+      return null;
+    }
+
+    return {
+      amount: Number(match[1]),
+      attackerName: match[2].trim(),
+      time: entry.time,
+      channelName: entry.channelName,
+      key: `${entry.time || "no-time"}|${entry.message}`,
+      message: entry.message,
+    };
+  }
+
+  function getLatestDamageEvent() {
+    const messages = getRecentChannelMessages()
+      .map(parseDamageMessage)
+      .filter(Boolean)
+      .sort((a, b) => {
+        const aTime = a.time ? Date.parse(a.time) : 0;
+        const bTime = b.time ? Date.parse(b.time) : 0;
+        return bTime - aTime;
+      });
+
+    return messages[0] || null;
+  }
+
+  function getReturnDelayMs() {
+    const baseDelayMs = normalizeDelayMs(config.returnDelayMs, 0);
+    const jitterMs = normalizeDelayMs(config.returnDelayJitterMs, 0);
+    if (!jitterMs) {
+      return baseDelayMs;
+    }
+
+    const randomOffset = Math.floor(Math.random() * ((jitterMs * 2) + 1)) - jitterMs;
+    return Math.max(0, baseDelayMs + randomOffset);
+  }
+
+  function clearPendingReturn() {
+    state.pendingReturnOrigin = null;
+    state.pendingReturnModules = null;
+    state.returnNotBeforeAt = 0;
+    state.lastThreatAt = 0;
+    state.lastReturnAttemptAt = 0;
+  }
+
+  function snapshotInterruptedModules() {
+    return {
+      caveRunning: !!bot.cave?.status?.().running,
+      equipRingRunning: !!bot.equipRing?.status?.().running,
+    };
+  }
+
+  function armPendingReturn(now = Date.now(), origin = normalizePosition(bot.getPlayerPosition())) {
+    if (!config.returnToOriginEnabled) {
+      clearPendingReturn();
+      return;
+    }
+
+    if (!state.pendingReturnOrigin && origin) {
+      state.pendingReturnOrigin = origin;
+      state.pendingReturnModules = snapshotInterruptedModules();
+    }
+
+    if (!state.pendingReturnOrigin) {
+      return;
+    }
+
+    state.lastThreatAt = now;
+    state.returnNotBeforeAt = now + getReturnDelayMs();
+  }
+
+  function isReturnCoastClear() {
+    return !getVisibleGameMasters().length && !getUnknownVisiblePlayers().length;
+  }
+
+  function restoreInterruptedModules() {
+    if (state.pendingReturnModules?.caveRunning) {
+      bot.cave?.start?.();
+    }
+
+    if (state.pendingReturnModules?.equipRingRunning) {
+      bot.equipRing?.start?.();
+      bot.ui?.refreshEquipRingStatus?.();
+    }
+  }
+
+  function tryReturnToOrigin(now = Date.now()) {
+    if (!config.returnToOriginEnabled || !state.pendingReturnOrigin || !state.returnNotBeforeAt) {
+      return false;
+    }
+
+    if (now < state.returnNotBeforeAt) {
+      return false;
+    }
+
+    if (!isReturnCoastClear()) {
+      return false;
+    }
+
+    if (now - state.lastReturnAttemptAt < normalizeDelayMs(config.returnRetryCooldownMs, 2000)) {
+      return false;
+    }
+
+    const currentPosition = normalizePosition(bot.getPlayerPosition());
+    if (isSamePosition(currentPosition, state.pendingReturnOrigin)) {
+      bot.log("panic return completed", {
+        origin: state.pendingReturnOrigin,
+        threatAgeMs: now - state.lastThreatAt,
+      });
+      restoreInterruptedModules();
+      clearPendingReturn();
+      return true;
+    }
+
+    state.lastReturnAttemptAt = now;
+    const moved =
+      !!bot.cave?.goToPosition?.(state.pendingReturnOrigin) ||
+      !!bot.pz?.goToTile?.({ __position: state.pendingReturnOrigin });
+
+    if (moved) {
+      bot.log("panic returning to origin", {
+        origin: state.pendingReturnOrigin,
+        threatAgeMs: now - state.lastThreatAt,
+      });
+      return true;
+    }
+
+    bot.log("panic return pathing failed", { origin: state.pendingReturnOrigin });
+    return false;
+  }
+
+  function triggerPanic(reason, details = {}) {
+    const now = Date.now();
+    armPendingReturn(now);
+
+    if (now - state.lastTriggerAt < config.triggerCooldownMs) {
+      return false;
+    }
+
+    state.lastTriggerAt = now;
+    bot.playAlarm?.();
+    bot.log("panic triggered", { reason, ...details });
+
+    if (bot.cave?.stop) {
+      bot.cave.stop({ persistEnabled: false });
+    }
+
+    if (bot.equipRing?.stop) {
+      bot.equipRing.stop({ persistEnabled: false });
+      bot.ui?.refreshEquipRingStatus?.();
+    }
+
+    return !!bot.pz?.goToHomePz?.();
+  }
+
+  function triggerGameMasterKillSwitch(players) {
+    const detectedPlayers = (players || []).map((player) => player?.name).filter(Boolean);
+
+    bot.playAlarm?.();
+    bot.log("game master kill switch triggered", { players: detectedPlayers });
+
+    if (bot.rune?.stop) {
+      bot.rune.stop();
+    }
+
+    if (bot.eat?.stop) {
+      bot.eat.stop();
+    }
+
+    if (bot.invisible?.stop) {
+      bot.invisible.stop();
+    }
+
+    if (bot.magicShield?.stop) {
+      bot.magicShield.stop();
+    }
+
+    if (bot.cave?.stop) {
+      bot.cave.stop();
+    }
+
+    if (bot.attack?.stop) {
+      bot.attack.stop();
+    }
+
+    if (bot.equipRing?.stop) {
+      bot.equipRing.stop();
+    }
+
+    clearPendingReturn();
+    config.unknownPlayerEnabled = false;
+    config.healthLossEnabled = false;
+    persistConfig();
+    stop();
+
+    bot.ui?.refreshPanicStatus?.();
+    bot.ui?.refreshRuneStatus?.();
+    bot.ui?.refreshAutoEatStatus?.();
+    bot.ui?.refreshAutoInvisibleStatus?.();
+    bot.ui?.refreshAutoMagicShieldStatus?.();
+    bot.ui?.refreshAutoAttackStatus?.();
+    bot.ui?.refreshCaveStatus?.();
+    bot.ui?.refreshEquipRingStatus?.();
+    return true;
+  }
+
+  function checkGameMasters() {
+    if (!getGameMasterNames().length) {
+      return false;
+    }
+
+    const visibleGameMasters = getVisibleGameMasters();
+    if (!visibleGameMasters.length) {
+      return false;
+    }
+
+    return triggerGameMasterKillSwitch(visibleGameMasters);
+  }
+
+  function checkUnknownPlayers() {
+    if (!config.unknownPlayerEnabled) {
+      return false;
+    }
+
+    const unknownPlayers = getUnknownVisiblePlayers();
+    if (!unknownPlayers.length) {
+      return false;
+    }
+
+    return triggerPanic("unknown-player", {
+      players: unknownPlayers.map((player) => player.name),
+    });
+  }
+
+  function checkHealthLoss() {
+    if (!config.healthLossEnabled) {
+      return false;
+    }
+
+    const playerState = bot.getPlayerState();
+    const currentHealth = Number(playerState?.health ?? 0);
+
+    if (state.lastHealth == null) {
+      state.lastHealth = currentHealth;
+      return false;
+    }
+
+    const lostHealth = currentHealth < state.lastHealth;
+    state.lastHealth = currentHealth;
+
+    if (!lostHealth) {
+      return false;
+    }
+
+    const latestDamageEvent = getLatestDamageEvent();
+    if (latestDamageEvent && latestDamageEvent.key !== state.lastDamageEventKey) {
+      state.lastDamageEventKey = latestDamageEvent.key;
+
+      const trustedNames = new Set(getTrustedNames());
+      const attackerName = normalizeName(latestDamageEvent.attackerName);
+
+      if (attackerName && trustedNames.has(attackerName)) {
+        bot.log("ignored health-loss panic because attacker is trusted", {
+          attacker: latestDamageEvent.attackerName,
+          amount: latestDamageEvent.amount,
+          currentHealth,
+        });
+        return false;
+      }
+
+      return triggerPanic("health-loss", {
+        currentHealth,
+        attacker: latestDamageEvent.attackerName,
+        amount: latestDamageEvent.amount,
+      });
+    }
+
+    const unknownPlayers = getUnknownVisiblePlayers();
+    if (!unknownPlayers.length) {
+      const trustedPlayers = getTrustedVisiblePlayers();
+      if (trustedPlayers.length) {
+        bot.log("ignored health-loss panic because only trusted players are nearby", {
+          players: trustedPlayers.map((player) => player.name),
+          currentHealth,
+        });
+        return false;
+      }
+    }
+
+    return triggerPanic("health-loss", { currentHealth });
+  }
+
+  function scheduleNextTick() {
+    if (!state.running) return;
+
+    state.timerId = window.setTimeout(() => {
+      tick();
+    }, config.tickMs);
+  }
+
+  function tick() {
+    if (!state.running) return;
+
+    try {
+      const triggered = checkGameMasters() || checkUnknownPlayers() || checkHealthLoss();
+      if (!triggered) {
+        tryReturnToOrigin();
+      }
+    } finally {
+      scheduleNextTick();
+    }
+  }
+
+  function shouldRun() {
+    return !!(getGameMasterNames().length || config.unknownPlayerEnabled || config.healthLossEnabled);
+  }
+
+  function start() {
+    if (state.running) {
+      return false;
+    }
+
+    state.running = true;
+    state.lastHealth = Number(bot.getPlayerState()?.health ?? 0);
+    state.lastDamageEventKey = getLatestDamageEvent()?.key || null;
+    bot.log("panic runner started", { ...config });
+    tick();
+    return true;
+  }
+
+  function stop() {
+    if (!state.running && state.timerId == null) {
+      state.lastHealth = null;
+      return false;
+    }
+
+    state.running = false;
+
+    if (state.timerId != null) {
+      window.clearTimeout(state.timerId);
+      state.timerId = null;
+    }
+
+    state.lastHealth = null;
+    state.lastDamageEventKey = null;
+    clearPendingReturn();
+    bot.log("panic runner stopped");
+    return true;
+  }
+
+  function syncRunningState() {
+    if (shouldRun()) {
+      start();
+    } else {
+      stop();
+    }
+  }
+
+  function updateConfig(nextConfig = {}) {
+    const next = { ...nextConfig };
+
+    if (Array.isArray(next.trustedNames)) {
+      next.trustedNames = next.trustedNames
+        .map((name) => String(name || "").trim())
+        .filter(Boolean);
+    }
+
+    if (Array.isArray(next.gameMasterNames)) {
+      next.gameMasterNames = next.gameMasterNames
+        .map((name) => String(name || "").trim())
+        .filter(Boolean);
+    }
+
+    if ("triggerCooldownMs" in next) {
+      next.triggerCooldownMs = normalizeDelayMs(next.triggerCooldownMs, config.triggerCooldownMs);
+    }
+
+    if ("returnDelayMs" in next) {
+      next.returnDelayMs = normalizeDelayMs(next.returnDelayMs, config.returnDelayMs);
+    }
+
+    if ("returnDelayJitterMs" in next) {
+      next.returnDelayJitterMs = normalizeDelayMs(next.returnDelayJitterMs, config.returnDelayJitterMs);
+    }
+
+    if ("returnRetryCooldownMs" in next) {
+      next.returnRetryCooldownMs = normalizeDelayMs(
+        next.returnRetryCooldownMs,
+        config.returnRetryCooldownMs
+      );
+    }
+
+    Object.assign(config, next);
+    if (!config.returnToOriginEnabled) {
+      clearPendingReturn();
+    }
+    persistConfig();
+    syncRunningState();
+    bot.log("panic runner config updated", { ...config });
+    return { ...config };
+  }
+
+  function status() {
+    return {
+      running: state.running,
+      config: {
+        ...config,
+        trustedNames: [...config.trustedNames],
+        gameMasterNames: [...config.gameMasterNames],
+      },
+      visiblePlayers: getVisiblePlayers().map((player) => ({
+        id: player.id,
+        name: player.name,
+        position: player.__position || null,
+      })),
+      unknownVisiblePlayers: getUnknownVisiblePlayers().map((player) => ({
+        id: player.id,
+        name: player.name,
+        position: player.__position || null,
+      })),
+      trustedVisiblePlayers: getTrustedVisiblePlayers().map((player) => ({
+        id: player.id,
+        name: player.name,
+        position: player.__position || null,
+      })),
+      visibleGameMasters: getVisibleGameMasters().map((player) => ({
+        id: player.id,
+        name: player.name,
+        position: player.__position || null,
+      })),
+      latestDamageEvent: getLatestDamageEvent(),
+      lastTriggerAt: state.lastTriggerAt,
+      pendingReturn: state.pendingReturnOrigin
+        ? {
+            origin: { ...state.pendingReturnOrigin },
+            modules: state.pendingReturnModules ? { ...state.pendingReturnModules } : null,
+            returnNotBeforeAt: state.returnNotBeforeAt,
+            lastThreatAt: state.lastThreatAt,
+            lastReturnAttemptAt: state.lastReturnAttemptAt,
+            coastClear: isReturnCoastClear(),
+          }
+        : null,
+    };
+  }
+
+  if (shouldRun()) {
+    start();
+  }
+
+  bot.panic = {
+    start,
+    stop,
+    status,
+    updateConfig,
+    getVisiblePlayers,
+    getUnknownVisiblePlayers,
+    getTrustedVisiblePlayers,
+    getVisibleGameMasters,
+    getTrustedNames,
+    getGameMasterNames,
+    config,
+  };
+};
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
@@ -1432,6 +2036,53 @@ window.__minibiaBotBundle.installRuneModule = function installRuneModule(bot) {
   bot.startRuneLoop = start;
   bot.stopRuneLoop = stop;
 };
+
+// ============================================================
+//  src/modules/heal.js
+//  Auto-Heal module — segue o padrão installHealModule do bot
+//
+//  Dois canais independentes com prioridade própria:
+//
+//  Canal HP:
+//    priority "safe"     → usa poção quando HP cai abaixo de minHpSafe     (ex: 70%)
+//    priority "critical" → usa poção quando HP cai abaixo de minHpCritical (ex: 30%)
+//
+//  Canal Mana:
+//    priority "safe"     → usa poção quando mana cai abaixo de minManaSafe
+//    priority "critical" → usa poção quando mana cai abaixo de minManaCritical
+//
+//  A prioridade define qual threshold é usado no tick.
+//  Ambos os thresholds ficam salvos no config para trocar sem redigitar.
+//
+//  API:
+//    minibiaBot.heal.start()
+//    minibiaBot.heal.stop()
+//    minibiaBot.heal.status()
+//    minibiaBot.heal.updateConfig({ hpPriority: "safe", manaPriority: "critical", ... })
+//
+//  Exemplos rápidos no console:
+//    minibiaBot.heal.start({ hpPriority: "safe", manaPriority: "critical" })
+//    minibiaBot.heal.updateConfig({ hpPriority: "critical" })
+//    minibiaBot.heal.updateConfig({ minHpSafe: 300, minHpCritical: 100 })
+// ============================================================
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+// ============================================================
+//  src/modules/heal.js
+//
+//  HP — dois níveis de cura com prioridade:
+//    Nível 1 (fraco):  HP% < threshold1 → hotkey 1
+//    Nível 2 (forte):  HP% < threshold2 → hotkey 2 (prioridade maior)
+//    O nível 2 é verificado primeiro — se HP estiver muito baixo
+//    usa a cura forte, senão usa a fraca.
+//
+//  Mana — um único nível:
+//    Mana < minMana → hotkey mana
+// ============================================================
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
 // ============================================================
 //  src/modules/heal.js
 //
@@ -1652,7 +2303,6 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
 
   bot.heal = { start, stop, status, updateConfig, readStats, tryHeal, normalizeSlot, config };
 };
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvisibleModule(bot) {
   const configStorageKey = "minibiaBot.invisible.config";
@@ -1868,6 +2518,7 @@ window.__minibiaBotBundle.installAutoInvisibleModule = function installAutoInvis
     config,
   };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMagicShieldModule(bot) {
@@ -2106,6 +2757,11 @@ window.__minibiaBotBundle.installAutoMagicShieldModule = function installAutoMag
     config,
   };
 };
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackModule(bot) {
@@ -3043,7 +3699,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   if (config.enabled) {
     start();
   }
-  
+
   bot.addCleanup(() => {
     stop({ persistEnabled: false });
   });
@@ -3067,7 +3723,6 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     config,
   };
 };
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   const configStorageKey = "minibiaBot.cave.config";
@@ -3111,10 +3766,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // ── VELOCIDADE: valores padrão mais agressivos ──────────────
   const config = Object.assign(
     {
-      tickMs: 50,          // era 500 — 5x mais rápido
-      repathMs: 50,        // era 1500 — recalcula caminho bem mais rápido
-      observerMs: 50,       // era 200 — detecta mudança de posição bem mais rápido
-      waypointTolerance: 5,  //  Se você aumentar esse número, ele vai marcar como "chegado" mais cedo 
+      tickMs: 50,           // tick ultra rápido
+      repathMs: 50,        // recalcula caminho bem mais rápido
+      observerMs: 50,       // detecta mudança de posição bem mais rápido
+      waypointTolerance: 5, // considera chegou com 1 tile de tolerância (mais preciso e rápido)
       waypointLookahead: 12,
       pauseUntilClear: true,
       pauseUntilSpawn: true,
@@ -3919,7 +4574,6 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       if (index !== state.currentIndex) {
         state.currentIndex = index >= route.length ? 0 : index;
       }
-
       const currentWaypoint = getCurrentWaypoint();
       const currentDistance = getDistanceToWaypoint(position, currentWaypoint);
       const aheadIndex = findAheadWaypointIndex(position, state.currentIndex, direction);
@@ -4504,38 +5158,6 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   if (config.enabled && route.length) start();
 
-  // ── VIGIA DE RECONEXÃO ───────────────────────────────────────
-  // Em vez de tentar adivinhar pelo estado interno da conexão,
-  // captura direto a mensagem que o jogo já escreve no console
-  // quando reconecta de verdade ("Reconnected to the gameserver.").
-  if (!window.__caveReconnectHookInstalled) {
-    window.__caveReconnectHookInstalled = true;
-    const originalConsoleLog = console.log.bind(console);
-
-    console.log = function (...args) {
-      originalConsoleLog(...args);
-      try {
-        const texto = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
-        if (texto.includes("Reconnected to the gameserver")) {
-          window.dispatchEvent(new CustomEvent("minibia:reconnected"));
-        }
-      } catch (e) {
-        // silencioso — não deixa o hook quebrar o console original
-      }
-    };
-  }
-
-  window.addEventListener("minibia:reconnected", function () {
-    bot.log("cave reconnect detected (via console hook)");
-    window.setTimeout(() => {
-      if (route.length) {
-        stop({ persistEnabled: false });
-        const iniciou = start();
-        bot.log("cave bot desativado e reativado após reconexão", { sucesso: iniciou });
-      }
-    }, 2000);
-  });
-
   // ── Auto Record de Waypoints ─────────────────────────────────
   // Em vez de clicar "Add Waypoint" toda hora, liga isso e anda —
   // ele grava a rota sozinho enquanto você caminha (reaproveitando
@@ -4609,6 +5231,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     isAtWaypoint,
   };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installEquipRingModule = function installEquipRingModule(bot) {
@@ -4905,6 +5528,9 @@ window.__minibiaBotBundle.installEquipRingModule = function installEquipRingModu
     tryEquipRing,
   };
 };
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoEatModule = function installAutoEatModule(bot) {
@@ -5108,7 +5734,6 @@ window.__minibiaBotBundle.installAutoEatModule = function installAutoEatModule(b
     bot.rune.isSated = isSated;
   }
 };
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   const configStorageKey = "minibiaBot.talk.config";
@@ -5780,6 +6405,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     config,
   };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installAutoFollowModule = function installAutoFollowModule(bot) {
@@ -6127,11 +6753,14 @@ window.__minibiaBotBundle.installAutoFollowModule = function installAutoFollowMo
     config,
   };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModule(bot) {
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-  const configStorageKey = "minibiaBot.autoStack.config";
+window.__minibiaBotBundle.installautostackModule = function installautostackModule(bot) {
+
+  const configStorageKey = "minibiaBot.autostack.config";
 
   const config = Object.assign(
     {
@@ -6346,14 +6975,15 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
   if (config.enabled) start();
 
-  bot.autoStack = { start, stop, runOnce, status, updateConfig, config };
+  bot.autostack = { start, stop, runOnce, status, updateConfig, config };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingByCapModule(bot) {
+window.__minibiaBotBundle.installautoringbycapModule = function installautoringbycapModule(bot) {
 
-  const configStorageKey = "minibiaBot.autoRingByCap.config";
-  const originStorageKey = "minibiaBot.autoRingByCap.origin";
+  const configStorageKey = "minibiaBot.autoringbycap.config";
+  const originStorageKey = "minibiaBot.autoringbycap.origin";
   const RING_SLOT = 8;
 
   const config = Object.assign(
@@ -6459,7 +7089,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
       }
       return false;
     } catch (e) {
-      bot.log("autoRingByCap sendMove error", e?.message || e);
+      bot.log("autoringbycap sendMove error", e?.message || e);
       return false;
     }
   }
@@ -6487,7 +7117,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     // Fallback: primeiro slot vazio disponível (preferindo mesmo container)
     if (!destContainer) {
       const empty = findEmptySlot(state.ringOrigin?.containerId);
-      if (!empty) { bot.log("autoRingByCap: sem slot vazio para devolver anel"); return false; }
+      if (!empty) { bot.log("autoringbycap: sem slot vazio para devolver anel"); return false; }
       destContainer = empty.container;
       destSlot      = empty.slotIndex;
     }
@@ -6499,7 +7129,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
 
     if (ok) {
       state.lastActionAt = now;
-      bot.log("autoRingByCap: anel removido (cap baixa)", {
+      bot.log("autoringbycap: anel removido (cap baixa)", {
         cap    : getCurrentCap(),
         capMin : config.capMin,
         ring   : getItemName(ring),
@@ -6528,7 +7158,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
 
     // Fallback: busca em qualquer container aberto
     if (!src) src = findRingInContainers();
-    if (!src) { bot.log("autoRingByCap: nenhum anel encontrado nos containers"); return false; }
+    if (!src) { bot.log("autoringbycap: nenhum anel encontrado nos containers"); return false; }
 
     // Salva a origem antes de mover
     state.ringOrigin = { containerId: src.containerId, slotIndex: src.slotIndex };
@@ -6541,7 +7171,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
 
     if (ok) {
       state.lastActionAt = now;
-      bot.log("autoRingByCap: anel equipado (cap ok)", {
+      bot.log("autoringbycap: anel equipado (cap ok)", {
         cap           : getCurrentCap(),
         capPut        : config.capPut,
         ring          : getItemName(src.item),
@@ -6570,7 +7200,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     try {
       tryManageRing();
     } catch (e) {
-      bot.log("autoRingByCap tick error", e?.message || e);
+      bot.log("autoringbycap tick error", e?.message || e);
     } finally {
       if (state.running) state.timerId = window.setTimeout(tick, config.tickMs);
     }
@@ -6579,9 +7209,9 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
   function start(overrides = {}) {
     Object.assign(config, overrides, { enabled: true });
     persistConfig();
-    if (state.running) { bot.log("autoRingByCap already running"); return false; }
+    if (state.running) { bot.log("autoringbycap already running"); return false; }
     state.running = true;
-    bot.log("autoRingByCap started", { ...config });
+    bot.log("autoringbycap started", { ...config });
     tick();
     return true;
   }
@@ -6590,7 +7220,7 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     state.running = false;
     if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
     if (opts.persistEnabled !== false) { config.enabled = false; persistConfig(); }
-    bot.log("autoRingByCap stopped");
+    bot.log("autoringbycap stopped");
     return true;
   }
 
@@ -6612,291 +7242,455 @@ window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingB
     if ("tickMs"          in next) next.tickMs          = Math.max(500, Number(next.tickMs)          || 1000);
     Object.assign(config, next);
     persistConfig();
-    bot.log("autoRingByCap config updated", { ...config });
+    bot.log("autoringbycap config updated", { ...config });
     return { ...config };
   }
 
   function clearOrigin() {
     state.ringOrigin = null;
     bot.storage.remove(originStorageKey);
-    bot.log("autoRingByCap: origem do anel limpa");
+    bot.log("autoringbycap: origem do anel limpa");
   }
 
   if (config.enabled) start();
 
-  bot.autoRingByCap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
+  bot.autoringbycap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installChatdetectorModule = function installChatdetectorModule(bot) {
-  const configStorageKey = "minibiaBot.chatDetector.config";
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-  const defaultConfig = {
-    enabled: false,
-    alarmarQualquer: true,   // toca alarme em qualquer mensagem de outra pessoa
-    alarmarMencao: false,    // toca alarme quando te mencionam
-    alarmarVigiados: false,  // toca alarme quando bate um termo vigiado
-    volume: 0.3,
-    tomHz: 880,
-    qtdBips: 3,
-    canaisPermitidos: ["Default", "Console"],
-    ignorarSeContiver: ["hitpoints", "attack"],
-    termosVigiados: [],
-    pollIntervalMs: 500,
-  };
+window.__minibiaBotBundle.installastemodule = function installastemodule(bot) {
 
-  const config = Object.assign({}, defaultConfig, bot.storage.get(configStorageKey, {}));
+  const configstoragekey = "minibiaBot.haste.config";
+  // ID 17 = utani hur | ID 14 = utani gran hur
+  const haste_condition_ids = [14, 17];
 
-  function persistConfig() {
-    bot.storage.set(configStorageKey, { ...config });
-  }
+  const config = Object.assign(
+    {
+      tickms    : 500,
+      spellwords: "utani hur",
+      enabled   : false,
+    },
+    bot.storage.get(configstoragekey, {})
+  );
 
   const state = {
-    running: false,
-    timerId: null,
-    playerName: null,
-    mensagensProcessadas: new WeakSet(),
+    running   : false,
+    timerid   : null,
+    lastcastat: 0,
   };
 
-  function tocarAlarme() {
-    try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioCtx();
+  let resumelistenersattached = false;
 
-      for (let i = 0; i < config.qtdBips; i++) {
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        oscillator.connect(gain);
-        gain.connect(ctx.destination);
+  function persistconfig() { bot.storage.set(configstoragekey, { ...config }); }
 
-        oscillator.type = "square";
-        oscillator.frequency.value = config.tomHz;
-        gain.gain.value = config.volume;
+  function ishasteactive() {
+    const player = window.gameClient?.player;
+    const conditions = player?.conditions;
+    for (const id of haste_condition_ids) {
+      if (conditions?.__conditions?.has?.(id)) return true;
+      if (conditions?.has?.(id)) return true;
+      if (player?.hasCondition?.(id)) return true;
+    }
+    return false;
+  }
 
-        const inicio = ctx.currentTime + i * 0.3;
-        oscillator.start(inicio);
-        oscillator.stop(inicio + 0.2);
-      }
-    } catch (erro) {
-      bot.log("chatDetector alarm error: " + erro?.message);
+  function hasvisibletarget() {
+    if (window.gameClient?.player?.__target) return true;
+    const monsters = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+    return monsters.length > 0;
+  }
+
+  function getgatestatus() {
+    const hasteactive    = ishasteactive();
+    const targetonscreen = hasvisibletarget();
+    return {
+      hasteactive,
+      targetonscreen,
+      cancast: !hasteactive && !targetonscreen,
+    };
+  }
+
+  function trycasthaste() {
+    // Verifica state.running E config.enabled — dupla proteção
+    if (!state.running || !config.enabled) return false;
+    const gate = getgatestatus();
+    if (!gate.cancast) return false;
+    const now = Date.now();
+    if (now - state.lastcastat < 1000) return false;
+    const sent = bot.sendChat(config.spellwords);
+    if (sent) {
+      state.lastcastat = now;
+      bot.log("haste cast", { spell: config.spellwords });
+    }
+    return sent;
+  }
+
+  function schedulenexttick() {
+    if (!state.running) return;
+    state.timerid = window.setTimeout(tick, config.tickms);
+  }
+
+  function tick() {
+    // Dupla verificação no início do tick
+    if (!state.running || !config.enabled) return;
+    try { trycasthaste(); }
+    catch (e) { bot.log("haste tick error", e?.message || e); }
+    finally {
+      // Só agenda próximo tick se ainda estiver rodando
+      if (state.running && config.enabled) schedulenexttick();
     }
   }
 
-  function deveIgnorar(mensagem, remetente) {
-    const texto = (mensagem || "").toLowerCase();
-    const nome = (remetente || "").toLowerCase();
-    return (config.ignorarSeContiver || []).some((padrao) => {
-      const p = padrao.toLowerCase();
-      return texto.includes(p) || nome === p;
-    });
+  function runimmediatetick() {
+    if (!state.running) return;
+    if (state.timerid != null) { window.clearTimeout(state.timerid); state.timerid = null; }
+    tick();
   }
 
-  function ocultarMensagemNoDOM(remetente, mensagem) {
-    try {
-      const spans = document.querySelectorAll(".chat-message");
-      for (const span of spans) {
-        if (span.style.display === "none") continue;
-        const spanMsg = span.getAttribute("data-message") || "";
-        const spanName = (span.getAttribute("name") || "").trim();
-        if (spanMsg === mensagem && spanName === remetente) {
-          span.style.display = "none";
-          break;
-        }
-      }
-    } catch (erro) {
-      bot.log("chatDetector erro ao esconder mensagem: " + erro?.message);
-    }
+  function handleresume() {
+    if (document.hidden) return;
+    runimmediatetick();
   }
 
-  function processarMensagem(msgObj, nomeCanal, ehHistorico) {
-    const remetente = (msgObj.name || "Sistema").trim();
-    const mensagem = msgObj.message || "";
-
-    const souEuPreCheck = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
-    const bateuVigiadoPreCheck = !souEuPreCheck && (config.termosVigiados || []).some((termo) =>
-      mensagem.toLowerCase().includes(termo.toLowerCase())
-    );
-
-    // Termos vigiados têm prioridade sobre a lista de ignorados — se a
-    // mensagem bater com um termo vigiado, ela nunca é bloqueada pelo
-    // filtro de ignorados (ex: "human" deve passar mesmo numa mensagem
-    // de combate que também contenha "attack").
-    if (!bateuVigiadoPreCheck && deveIgnorar(mensagem, remetente)) {
-      ocultarMensagemNoDOM(remetente, mensagem);
-      return;
-    }
-
-    const souEu = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
-    const fuiMencionado = state.playerName && !souEu && mensagem.toLowerCase().includes(state.playerName.toLowerCase());
-    const bateuVigiado = !souEu && (config.termosVigiados || []).some((termo) =>
-      mensagem.toLowerCase().includes(termo.toLowerCase())
-    );
-
-    const deveAlarmar =
-      !ehHistorico && (
-        (config.alarmarQualquer && !souEu) ||
-        (config.alarmarMencao && fuiMencionado) ||
-        (config.alarmarVigiados && bateuVigiado)
-      );
-
-    const prefixo = "[" + nomeCanal + "]";
-
-    if (bateuVigiado) {
-      console.log(
-        "%c" + prefixo + " [VIGIADO] " + remetente + ": " + mensagem,
-        "color: #ff5555; font-weight: bold;"
-      );
-    } else if (fuiMencionado) {
-      console.log(
-        "%c" + prefixo + " [MENÇÃO] " + remetente + ": " + mensagem,
-        "color: orange; font-weight: bold;"
-      );
-    } else {
-      console.log(prefixo + " [" + remetente + "] " + mensagem);
-    }
-
-    if (deveAlarmar) {
-      tocarAlarme();
-    }
+  function attachresumelisteners() {
+    if (resumelistenersattached) return;
+    document.addEventListener("visibilitychange", handleresume);
+    window.addEventListener("focus", handleresume);
+    window.addEventListener("pageshow", handleresume);
+    resumelistenersattached = true;
   }
 
-  function verificarCanais(ehVerificacaoInicial) {
-    const channelManager = window.gameClient?.interface?.channelManager;
-    if (!channelManager || !Array.isArray(channelManager.channels)) {
-      return;
-    }
-
-    channelManager.channels.forEach((channel, indice) => {
-      const nomeCanal = channel.name || ("Canal " + indice);
-
-      if (config.canaisPermitidos.length > 0 && !config.canaisPermitidos.includes(nomeCanal)) {
-        return;
-      }
-
-      const contents = channel.__contents || [];
-
-      // Em vez de comparar o TAMANHO da lista (que quebra se o canal
-      // descartar mensagens antigas ao atingir um limite), marca cada
-      // mensagem individualmente como "já vista" — assim funciona
-      // mesmo que o array não cresça mais.
-      contents.forEach((msgObj) => {
-        if (state.mensagensProcessadas.has(msgObj)) return;
-        state.mensagensProcessadas.add(msgObj);
-        processarMensagem(msgObj, nomeCanal, ehVerificacaoInicial);
-      });
-    });
+  function detachresumelisteners() {
+    if (!resumelistenersattached) return;
+    document.removeEventListener("visibilitychange", handleresume);
+    window.removeEventListener("focus", handleresume);
+    window.removeEventListener("pageshow", handleresume);
+    resumelistenersattached = false;
   }
 
-  function start() {
-    config.enabled = true;
-    persistConfig();
-
-    if (state.running) {
-      bot.log("chat detector already running");
-      return false;
-    }
-
-    if (!window.gameClient) {
-      bot.log("chat detector cannot start: gameClient not ready");
-      return false;
-    }
-
-    state.playerName = (window.gameClient?.player?.name || "").trim() || null;
-    state.mensagensProcessadas = new WeakSet();
-
-    // Primeira passada: marca tudo que já existe como "histórico"
-    // (não dispara alarme), só estabelece o ponto de partida.
-    verificarCanais(true);
-
-    state.timerId = window.setInterval(() => verificarCanais(false), config.pollIntervalMs);
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    persistconfig();
+    if (state.running) { bot.log("haste already running"); return false; }
     state.running = true;
-    bot.log("chat detector started", { jogador: state.playerName });
+    attachresumelisteners();
+    bot.log("haste started", { ...config });
+    tick();
     return true;
   }
 
-  function stop(options = {}) {
-    const { persistEnabled = true } = options;
-
-    if (state.timerId != null) {
-      window.clearInterval(state.timerId);
-      state.timerId = null;
-    }
+  function stop(opts = {}) {
+    // Para tudo imediatamente
     state.running = false;
-
-    if (persistEnabled) {
-      config.enabled = false;
-      persistConfig();
+    config.enabled = false;
+    if (state.timerid != null) {
+      window.clearTimeout(state.timerid);
+      state.timerid = null;
     }
-
-    bot.log("chat detector stopped");
-    return true;
-  }
-
-  function updateConfig(overrides = {}) {
-    Object.assign(config, overrides);
-    persistConfig();
-    return { ...config };
-  }
-
-  function addIgnored(termo) {
-    const t = (termo || "").trim();
-    if (!t) return false;
-    if ((config.ignorarSeContiver || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
-      return false;
-    }
-    config.ignorarSeContiver = [...(config.ignorarSeContiver || []), t];
-    persistConfig();
-    return true;
-  }
-
-  function removeIgnored(termo) {
-    config.ignorarSeContiver = (config.ignorarSeContiver || []).filter((x) => x !== termo);
-    persistConfig();
-    return true;
-  }
-
-  function addWatched(termo) {
-    const t = (termo || "").trim();
-    if (!t) return false;
-    if ((config.termosVigiados || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
-      return false;
-    }
-    config.termosVigiados = [...(config.termosVigiados || []), t];
-    persistConfig();
-    return true;
-  }
-
-  function removeWatched(termo) {
-    config.termosVigiados = (config.termosVigiados || []).filter((x) => x !== termo);
-    persistConfig();
+    detachresumelisteners();
+    if (opts.persistEnabled !== false) { persistconfig(); }
+    bot.log("haste stopped");
     return true;
   }
 
   function status() {
     return {
-      running: state.running,
-      playerName: state.playerName,
-      config: { ...config },
+      running   : state.running,
+      config    : { ...config },
+      gates     : getgatestatus(),
+      lastcastat: state.lastcastat,
     };
   }
 
-  if (config.enabled) {
-    start();
+  function updateconfig(next = {}) {
+    if ("spellwords" in next) next.spellwords = String(next.spellwords || "").trim() || config.spellwords;
+    if ("tickms"     in next) next.tickms     = Math.max(250, Number(next.tickms) || 500);
+    Object.assign(config, next);
+    persistconfig();
+    bot.log("haste config updated", { ...config });
+    return { ...config };
   }
 
-  bot.Chatdetector = {
-    start,
-    stop,
+  if (config.enabled) start();
+
+  bot.haste = { start, stop, status, updateconfig, ishasteactive, hasvisibletarget, trycasthaste, config };
+};
+
+
+window.__minibiaBotBundle.installProfilesModule = function installProfilesModule(bot) {
+  const profilesStorageKey = "minibiaBot.profiles.list";
+  const activeProfileStorageKey = "minibiaBot.profiles.active";
+
+  // ── Lista de todos os módulos e suas storage keys ─────────────────────────
+  const MODULE_CONFIGS = [
+    { name: "rune",        key: "minibiaBot.rune.config" },
+    { name: "heal",        key: "minibiaBot.heal.config" },
+    { name: "invisible",   key: "minibiaBot.invisible.config" },
+    { name: "magicShield", key: "minibiaBot.magicShield.config" },
+    { name: "attack",      key: "minibiaBot.attack.config" },
+    { name: "cave",        key: "minibiaBot.cave.config" },
+    { name: "equipRing",   key: "minibiaBot.equipRing.config" },
+    { name: "eat",         key: "minibiaBot.eat.config" },
+    { name: "talk",        key: "minibiaBot.talk.config" },
+    { name: "follow",      key: "minibiaBot.follow.config" },
+    { name: "runeCheck",   key: "minibiaBot.runeCheck.config" },
+    { name: "pz",          key: "minibiaBot.pz.home" },
+    { name: "xray",        key: "minibiaBot.xray.config" },
+    { name: "panic",       key: "minibiaBot.panic.config" },
+  ];
+
+  // ── storage helpers ───────────────────────────────────────────────────────
+
+  function loadProfiles() {
+    return bot.storage.get(profilesStorageKey, {}) || {};
+  }
+
+  function saveProfiles(profiles) {
+    bot.storage.set(profilesStorageKey, profiles);
+  }
+
+  function getActiveProfileName() {
+    return bot.storage.get(activeProfileStorageKey, null);
+  }
+
+  function setActiveProfileName(name) {
+    if (name) {
+      bot.storage.set(activeProfileStorageKey, name);
+    } else {
+      bot.storage.remove(activeProfileStorageKey);
+    }
+  }
+
+  // ── captura snapshot de todas as configs atuais ───────────────────────────
+
+  function captureSnapshot() {
+    const snapshot = {};
+    for (const { name, key } of MODULE_CONFIGS) {
+      try {
+        const raw = window.localStorage.getItem(key);
+        if (raw != null) {
+          snapshot[name] = JSON.parse(raw);
+        }
+      } catch (err) {
+        bot.log(`profiles: failed to read ${name} config`, err?.message || err);
+      }
+    }
+    return snapshot;
+  }
+
+  // ── aplica snapshot restaurando cada config no localStorage ──────────────
+
+  function applySnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+
+    for (const { name, key } of MODULE_CONFIGS) {
+      if (!Object.prototype.hasOwnProperty.call(snapshot, name)) continue;
+
+      try {
+        window.localStorage.setItem(key, JSON.stringify(snapshot[name]));
+      } catch (err) {
+        bot.log(`profiles: failed to restore ${name} config`, err?.message || err);
+      }
+    }
+
+    return true;
+  }
+
+  // ── API pública ───────────────────────────────────────────────────────────
+
+  function listProfiles() {
+    return Object.keys(loadProfiles()).sort();
+  }
+
+  function saveProfile(profileName) {
+    const name = String(profileName || "").trim();
+    if (!name) {
+      bot.log("profiles: profile name cannot be empty");
+      return false;
+    }
+
+    const profiles = loadProfiles();
+    profiles[name] = {
+      savedAt: Date.now(),
+      configs: captureSnapshot(),
+    };
+    saveProfiles(profiles);
+    setActiveProfileName(name);
+    bot.log(`profiles: saved "${name}"`, { modules: Object.keys(profiles[name].configs) });
+    return true;
+  }
+
+  function loadProfile(profileName) {
+    const name = String(profileName || "").trim();
+    if (!name) {
+      bot.log("profiles: profile name cannot be empty");
+      return false;
+    }
+
+    const profiles = loadProfiles();
+    const profile = profiles[name];
+    if (!profile) {
+      bot.log(`profiles: profile "${name}" not found`, { available: Object.keys(profiles) });
+      return false;
+    }
+
+    const applied = applySnapshot(profile.configs);
+    if (!applied) {
+      bot.log(`profiles: failed to apply "${name}"`);
+      return false;
+    }
+
+    setActiveProfileName(name);
+    bot.log(`profiles: loaded "${name}" — reloading bot...`);
+
+    // Recarrega o bot para aplicar as novas configs
+    window.setTimeout(() => {
+      window.minibiaBotReload?.();
+    }, 100);
+
+    return true;
+  }
+
+  function deleteProfile(profileName) {
+    const name = String(profileName || "").trim();
+    if (!name) return false;
+
+    const profiles = loadProfiles();
+    if (!Object.prototype.hasOwnProperty.call(profiles, name)) {
+      bot.log(`profiles: profile "${name}" not found`);
+      return false;
+    }
+
+    delete profiles[name];
+    saveProfiles(profiles);
+
+    if (getActiveProfileName() === name) {
+      setActiveProfileName(null);
+    }
+
+    bot.log(`profiles: deleted "${name}"`);
+    return true;
+  }
+
+  function renameProfile(oldName, newName) {
+    const from = String(oldName || "").trim();
+    const to = String(newName || "").trim();
+    if (!from || !to || from === to) return false;
+
+    const profiles = loadProfiles();
+    if (!profiles[from]) {
+      bot.log(`profiles: profile "${from}" not found`);
+      return false;
+    }
+
+    if (profiles[to]) {
+      bot.log(`profiles: profile "${to}" already exists`);
+      return false;
+    }
+
+    profiles[to] = profiles[from];
+    delete profiles[from];
+    saveProfiles(profiles);
+
+    if (getActiveProfileName() === from) {
+      setActiveProfileName(to);
+    }
+
+    bot.log(`profiles: renamed "${from}" → "${to}"`);
+    return true;
+  }
+
+  function exportProfile(profileName) {
+    const name = String(profileName || "").trim();
+    const profiles = loadProfiles();
+    const profile = name ? profiles[name] : null;
+    const data = name
+      ? (profile ? { [name]: profile } : null)
+      : profiles;
+
+    if (!data) {
+      bot.log(`profiles: profile "${name}" not found`);
+      return null;
+    }
+
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name ? `minibia-profile-${name}.json` : "minibia-profiles.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+    bot.log(`profiles: exported "${name || "all profiles"}"`);
+    return json;
+  }
+
+  function importProfiles(jsonString, overwrite = false) {
+    let data;
+    try {
+      data = JSON.parse(jsonString);
+    } catch (err) {
+      bot.log("profiles: import failed — invalid JSON", err?.message || err);
+      return false;
+    }
+
+    if (typeof data !== "object" || !data) {
+      bot.log("profiles: import failed — expected an object");
+      return false;
+    }
+
+    const profiles = loadProfiles();
+    let imported = 0;
+
+    for (const [name, profile] of Object.entries(data)) {
+      if (!name || typeof profile !== "object") continue;
+      if (!overwrite && profiles[name]) {
+        bot.log(`profiles: skipped "${name}" (already exists, use overwrite=true)`);
+        continue;
+      }
+      profiles[name] = profile;
+      imported++;
+    }
+
+    saveProfiles(profiles);
+    bot.log(`profiles: imported ${imported} profile(s)`);
+    return imported > 0;
+  }
+
+  function status() {
+    const names = listProfiles();
+    const active = getActiveProfileName();
+    return {
+      profiles: names,
+      activeProfile: active,
+      count: names.length,
+    };
+  }
+
+  bot.profiles = {
+    list: listProfiles,
+    save: saveProfile,
+    load: loadProfile,
+    delete: deleteProfile,
+    rename: renameProfile,
+    export: exportProfile,
+    import: importProfiles,
     status,
-    updateConfig,
-    addIgnored,
-    removeIgnored,
-    addWatched,
-    removeWatched,
+    getActiveProfileName,
   };
 
-  bot.addCleanup(() => stop({ persistEnabled: false }));
+  bot.log("profiles module ready", {
+    profiles: listProfiles(),
+    active: getActiveProfileName(),
+  });
 };
+ 
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installFriendHealModule = function installFriendHealModule(bot) {
@@ -6971,6 +7765,50 @@ window.__minibiaBotBundle.installFriendHealModule = function installFriendHealMo
   if (config.enabled && config.targetName) start();
   bot.friendHeal = { start, stop, status, updateConfig, tryHeal, config };
 };
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installAutoSpellModule = function installAutoSpellModule(bot) {
+  const configStorageKey = "minibiaBot.autoSpell.config";
+  const state = { running: false, timerId: null, lastCastAt: 0 };
+  const config = Object.assign({ tickMs: 200, spellWords: "exori", minMobCount: 2, cooldownMs: 2000, enabled: false }, bot.storage.get(configStorageKey, {}));
+  function persistConfig() { bot.storage.set(configStorageKey, { ...config }); }
+  function getAdjacentMobs() {
+    const playerPos = bot.getPlayerPosition();
+    if (!playerPos) return [];
+    return (bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || []).filter((creature) => {
+      const pos = creature?.__position || creature?.getPosition?.();
+      if (!pos || pos.z !== playerPos.z) return false;
+      return Math.abs(pos.x - playerPos.x) <= 1 && Math.abs(pos.y - playerPos.y) <= 1;
+    });
+  }
+  function isCombatActive() { return !!bot.attack?.isCombatActive?.(); }
+  function canCast(now) {
+    if (!config.enabled || !isCombatActive()) return false;
+    if (now - state.lastCastAt < Math.max(0, Number(config.cooldownMs) || 2000)) return false;
+    return getAdjacentMobs().length >= Math.max(1, Number(config.minMobCount) || 2);
+  }
+  function tryCast() {
+    const now = Date.now();
+    if (!canCast(now)) return false;
+    const sent = bot.sendChat(config.spellWords);
+    if (sent) { state.lastCastAt = now; bot.log("auto spell cast", { spell: config.spellWords, mobs: getAdjacentMobs().length }); }
+    return sent;
+  }
+  function tick() { if (!state.running) return; try { tryCast(); } catch (e) { bot.log("auto spell tick error", e?.message); } finally { if (state.running) state.timerId = window.setTimeout(tick, config.tickMs); } }
+  function start(ov = {}) { Object.assign(config, ov, { enabled: true }); persistConfig(); if (state.running) return false; state.running = true; bot.log("auto spell started", { ...config }); tick(); return true; }
+  function stop(opts = {}) { const p = opts.persistEnabled !== false; state.running = false; if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; } if (p) { config.enabled = false; persistConfig(); } bot.log("auto spell stopped"); return true; }
+  function status() { return { running: state.running, config: { ...config }, adjacentMobs: getAdjacentMobs().length, combatActive: isCombatActive(), lastCastAt: state.lastCastAt }; }
+  function updateConfig(next = {}) {
+    if ("spellWords" in next) next.spellWords = String(next.spellWords || "").trim() || config.spellWords;
+    if ("minMobCount" in next) next.minMobCount = Math.max(1, Math.trunc(Number(next.minMobCount) || 2));
+    if ("cooldownMs" in next) next.cooldownMs = Math.max(500, Number(next.cooldownMs) || 2000);
+    Object.assign(config, next); persistConfig(); return { ...config };
+  }
+  if (config.enabled) start();
+  bot.autoSpell = { start, stop, status, updateConfig, getAdjacentMobs, tryCast, config };
+};
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installDistanceAttackModule = function installDistanceAttackModule(bot) {
@@ -7052,6 +7890,7 @@ window.__minibiaBotBundle.installDistanceAttackModule = function installDistance
   if (config.enabled) start();
   bot.distanceAttack = { start, stop, status, updateConfig, tryDistanceAttack, config };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installMeleePositionModule = function installMeleePositionModule(bot) {
@@ -7327,184 +8166,231 @@ window.__minibiaBotBundle.installMeleePositionModule = function installMeleePosi
 
   bot.meleePosition = { start, stop, status, updateConfig, config };
 };
+
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installDropitemsModule = function installDropitemsModule(bot) {
-  const configStorageKey = "minibiaBot.dropItems.config";
 
-  const config = Object.assign(
-    {
-      enabled: false,
-      tickMs: 1000,
-      // Lista de itens a jogar no chão. Cada entrada pode ter sid e/ou cid
-      // (o que você tiver disponível já serve pra identificar o item).
-      itens: [], // ex: [{ sid: 3031, cid: null, nome: "moeda de ouro" }]
-      // Se null, joga sempre na posição atual do personagem.
-      // Se definido ({x,y,z}), joga sempre nesse lugar fixo.
-      posicaoFixa: null,
-    },
-    bot.storage.get(configStorageKey, {})
-  );
 
-  const state = {
-    running: false,
-    timerId: null,
-    totalJogados: 0,
+window.__minibiaBotBundle.installChatdetectorModule = function installChatdetectorModule(bot) {
+  const configStorageKey = "minibiaBot.chatDetector.config";
+
+  const defaultConfig = {
+    enabled: false,
+    alarmarQualquer: true,   // toca alarme em qualquer mensagem de outra pessoa
+    alarmarMencao: false,    // toca alarme quando te mencionam
+    alarmarVigiados: false,  // toca alarme quando bate um termo vigiado
+    volume: 0.3,
+    tomHz: 880,
+    qtdBips: 3,
+    canaisPermitidos: ["Default", "Console"],
+    ignorarSeContiver: ["hitpoints", "attack"],
+    termosVigiados: [],
+    pollIntervalMs: 500,
   };
+
+  const config = Object.assign({}, defaultConfig, bot.storage.get(configStorageKey, {}));
 
   function persistConfig() {
     bot.storage.set(configStorageKey, { ...config });
   }
 
-  function getOpenContainers() {
-    return Array.from(window.gameClient?.player?.__openedContainers || []);
+  const state = {
+    running: false,
+    timerId: null,
+    playerName: null,
+    mensagensProcessadas: new WeakSet(),
+  };
+
+  function tocarAlarme() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+
+      for (let i = 0; i < config.qtdBips; i++) {
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+
+        oscillator.type = "square";
+        oscillator.frequency.value = config.tomHz;
+        gain.gain.value = config.volume;
+
+        const inicio = ctx.currentTime + i * 0.3;
+        oscillator.start(inicio);
+        oscillator.stop(inicio + 0.2);
+      }
+    } catch (erro) {
+      bot.log("chatDetector alarm error: " + erro?.message);
+    }
   }
 
-  function getItemDef(item) {
-    if (!item) return null;
-    return (
-      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
-      window.gameClient?.itemDefinitionsBySid?.[item.sid] ||
-      window.gameClient?.itemDefinitions?.[item.id] ||
-      null
+  function deveIgnorar(mensagem, remetente) {
+    const texto = (mensagem || "").toLowerCase();
+    const nome = (remetente || "").toLowerCase();
+    return (config.ignorarSeContiver || []).some((padrao) => {
+      const p = padrao.toLowerCase();
+      return texto.includes(p) || nome === p;
+    });
+  }
+
+  function processarMensagem(msgObj, nomeCanal, ehHistorico) {
+    const remetente = (msgObj.name || "Sistema").trim();
+    const mensagem = msgObj.message || "";
+
+    const souEuPreCheck = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
+    const bateuVigiadoPreCheck = !souEuPreCheck && (config.termosVigiados || []).some((termo) =>
+      mensagem.toLowerCase().includes(termo.toLowerCase())
     );
-  }
 
-  function getItemName(item) {
-    return String(getItemDef(item)?.properties?.name || item?.name || "");
-  }
+    // Termos vigiados têm prioridade sobre a lista de ignorados — se a
+    // mensagem bater com um termo vigiado, ela nunca é bloqueada pelo
+    // filtro de ignorados (ex: "human" deve passar mesmo numa mensagem
+    // de combate que também contenha "attack").
+    if (!bateuVigiadoPreCheck && deveIgnorar(mensagem, remetente)) return;
 
-  function itemBateComLista(item) {
-    if (!item) return false;
-    return (config.itens || []).some((alvo) => {
-      const bateSid = alvo.sid != null && item.sid === alvo.sid;
-      const bateCid = alvo.cid != null && (item.cid ?? item.id) === alvo.cid;
-      return bateSid || bateCid;
-    });
-  }
+    const souEu = state.playerName ? remetente.toLowerCase() === state.playerName.toLowerCase() : false;
+    const fuiMencionado = state.playerName && !souEu && mensagem.toLowerCase().includes(state.playerName.toLowerCase());
+    const bateuVigiado = !souEu && (config.termosVigiados || []).some((termo) =>
+      mensagem.toLowerCase().includes(termo.toLowerCase())
+    );
 
-  function getGroundTile() {
-    const pos = config.posicaoFixa || bot.getPlayerPosition?.();
-    if (!pos) return null;
-    return window.gameClient?.world?.getTileFromWorldPosition?.(pos) || null;
-  }
-
-  function usarPosicaoAtual() {
-    const pos = bot.getPlayerPosition?.();
-    if (!pos) return false;
-    config.posicaoFixa = { x: pos.x, y: pos.y, z: pos.z };
-    persistConfig();
-    bot.log("dropItems: posição fixa definida", config.posicaoFixa);
-    return true;
-  }
-
-  function limparPosicaoFixa() {
-    config.posicaoFixa = null;
-    persistConfig();
-    bot.log("dropItems: voltou a usar a posição atual do personagem");
-    return true;
-  }
-
-  function jogarItemNoChao(container, slotIndex, item) {
-    const tileChao = getGroundTile();
-    if (!tileChao) {
-      bot.log("dropItems: não achei o tile do chão");
-      return false;
-    }
-
-    const count = (typeof item.getCount === "function" ? item.getCount() : item.count) || 1;
-
-    try {
-      window.gameClient.mouse.sendItemMove(
-        { which: container, index: slotIndex },
-        { which: tileChao, index: 0 },
-        count
+    const deveAlarmar =
+      !ehHistorico && (
+        (config.alarmarQualquer && !souEu) ||
+        (config.alarmarMencao && fuiMencionado) ||
+        (config.alarmarVigiados && bateuVigiado)
       );
-      state.totalJogados += 1;
-      bot.log("dropItems: item jogado no chão", {
-        nome: getItemName(item),
-        sid: item.sid,
-        cid: item.cid ?? item.id,
-        count,
+
+    const prefixo = "[" + nomeCanal + "]";
+
+    if (bateuVigiado) {
+      console.log(
+        "%c" + prefixo + " [VIGIADO] " + remetente + ": " + mensagem,
+        "color: #ff5555; font-weight: bold;"
+      );
+    } else if (fuiMencionado) {
+      console.log(
+        "%c" + prefixo + " [MENÇÃO] " + remetente + ": " + mensagem,
+        "color: orange; font-weight: bold;"
+      );
+    } else {
+      console.log(prefixo + " [" + remetente + "] " + mensagem);
+    }
+
+    if (deveAlarmar) {
+      tocarAlarme();
+    }
+  }
+
+  function verificarCanais(ehVerificacaoInicial) {
+    const channelManager = window.gameClient?.interface?.channelManager;
+    if (!channelManager || !Array.isArray(channelManager.channels)) {
+      return;
+    }
+
+    channelManager.channels.forEach((channel, indice) => {
+      const nomeCanal = channel.name || ("Canal " + indice);
+
+      if (config.canaisPermitidos.length > 0 && !config.canaisPermitidos.includes(nomeCanal)) {
+        return;
+      }
+
+      const contents = channel.__contents || [];
+
+      // Em vez de comparar o TAMANHO da lista (que quebra se o canal
+      // descartar mensagens antigas ao atingir um limite), marca cada
+      // mensagem individualmente como "já vista" — assim funciona
+      // mesmo que o array não cresça mais.
+      contents.forEach((msgObj) => {
+        if (state.mensagensProcessadas.has(msgObj)) return;
+        state.mensagensProcessadas.add(msgObj);
+        processarMensagem(msgObj, nomeCanal, ehVerificacaoInicial);
       });
-      return true;
-    } catch (erro) {
-      bot.log("dropItems: erro ao jogar item", erro?.message || erro);
-      return false;
-    }
-  }
-
-  function verificarEJogarItens() {
-    let jogados = 0;
-
-    getOpenContainers().forEach((container) => {
-      const slots = container?.slots || [];
-      for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
-        const item = container.getSlotItem?.(slotIndex) || slots[slotIndex]?.item;
-        if (!item?.id) continue;
-        if (!itemBateComLista(item)) continue;
-
-        if (jogarItemNoChao(container, slotIndex, item)) {
-          jogados++;
-        }
-      }
     });
-
-    return jogados;
   }
 
-  function tick() {
-    if (!state.running) return;
-
-    try {
-      if (config.enabled && (config.itens || []).length > 0) {
-        verificarEJogarItens();
-      }
-    } catch (erro) {
-      bot.log("dropItems tick error", erro?.message || erro);
-    } finally {
-      state.timerId = window.setTimeout(tick, config.tickMs);
-    }
-  }
-
-  function start(overrides = {}) {
-    Object.assign(config, overrides, { enabled: true });
+  function start() {
+    config.enabled = true;
     persistConfig();
 
     if (state.running) {
-      bot.log("dropItems already running");
+      bot.log("chat detector already running");
       return false;
     }
 
+    if (!window.gameClient) {
+      bot.log("chat detector cannot start: gameClient not ready");
+      return false;
+    }
+
+    state.playerName = (window.gameClient?.player?.name || "").trim() || null;
+    state.mensagensProcessadas = new WeakSet();
+
+    // Primeira passada: marca tudo que já existe como "histórico"
+    // (não dispara alarme), só estabelece o ponto de partida.
+    verificarCanais(true);
+
+    state.timerId = window.setInterval(() => verificarCanais(false), config.pollIntervalMs);
     state.running = true;
-    bot.log("dropItems started", { itens: config.itens });
-    tick();
+    bot.log("chat detector started", { jogador: state.playerName });
     return true;
   }
 
   function stop(options = {}) {
-    state.running = false;
+    const { persistEnabled = true } = options;
+
     if (state.timerId != null) {
-      window.clearTimeout(state.timerId);
+      window.clearInterval(state.timerId);
       state.timerId = null;
     }
-    if (options.persistEnabled !== false) {
+    state.running = false;
+
+    if (persistEnabled) {
       config.enabled = false;
       persistConfig();
     }
-    bot.log("dropItems stopped");
+
+    bot.log("chat detector stopped");
     return true;
   }
 
-  function addItem(sid, cid, nome) {
-    const entrada = { sid: sid ?? null, cid: cid ?? null, nome: nome || "" };
-    config.itens = [...(config.itens || []), entrada];
+  function updateConfig(overrides = {}) {
+    Object.assign(config, overrides);
     persistConfig();
-    return entrada;
+    return { ...config };
   }
 
-  function removeItem(index) {
-    config.itens = (config.itens || []).filter((_, i) => i !== index);
+  function addIgnored(termo) {
+    const t = (termo || "").trim();
+    if (!t) return false;
+    if ((config.ignorarSeContiver || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
+      return false;
+    }
+    config.ignorarSeContiver = [...(config.ignorarSeContiver || []), t];
+    persistConfig();
+    return true;
+  }
+
+  function removeIgnored(termo) {
+    config.ignorarSeContiver = (config.ignorarSeContiver || []).filter((x) => x !== termo);
+    persistConfig();
+    return true;
+  }
+
+  function addWatched(termo) {
+    const t = (termo || "").trim();
+    if (!t) return false;
+    if ((config.termosVigiados || []).some((x) => x.toLowerCase() === t.toLowerCase())) {
+      return false;
+    }
+    config.termosVigiados = [...(config.termosVigiados || []), t];
+    persistConfig();
+    return true;
+  }
+
+  function removeWatched(termo) {
+    config.termosVigiados = (config.termosVigiados || []).filter((x) => x !== termo);
     persistConfig();
     return true;
   }
@@ -7512,465 +8398,28 @@ window.__minibiaBotBundle.installDropitemsModule = function installDropitemsModu
   function status() {
     return {
       running: state.running,
+      playerName: state.playerName,
       config: { ...config },
-      totalJogados: state.totalJogados,
     };
-  }
-
-  function updateConfig(next = {}) {
-    Object.assign(config, next);
-    persistConfig();
-    return { ...config };
-  }
-
-  if (config.enabled) start();
-
-  bot.dropitems = {
-    start,
-    stop,
-    status,
-    updateConfig,
-    addItem,
-    removeItem,
-    usarPosicaoAtual,
-    limparPosicaoFixa,
-    runOnce: verificarEJogarItens,
-  };
-};
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
-
-window.__minibiaBotBundle.installLasttargetModule = function installLasttargetModule(bot) {
-  const configStorageKey = "minibiaBot.lastTarget.config";
-
-  const config = Object.assign(
-    {
-      enabled: false,
-      graceMs: 8000,       // por quanto tempo continua tentando o mesmo alvo depois de sumir
-      checkIntervalMs: 300, // com que frequência verifica
-    },
-    bot.storage.get(configStorageKey, {})
-  );
-
-  const state = {
-    running: false,
-    timerId: null,
-    lastTargetId: null,
-    lastSeenAt: 0,
-  };
-
-  function persistConfig() {
-    bot.storage.set(configStorageKey, { ...config });
-  }
-
-  function getCurrentTarget() {
-    return window.gameClient?.player?.__target || null;
-  }
-
-  function findCreatureById(id) {
-    if (id == null) return null;
-
-    const monstros = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
-    const jogadores = bot.xray?.getVisiblePlayers?.({ sameFloorOnly: true }) || [];
-    return [...monstros, ...jogadores].find((c) => c?.id === id) || null;
-  }
-
-  function setTarget(creature) {
-    if (!creature || !window.gameClient?.player || typeof window.gameClient.send !== "function") {
-      return false;
-    }
-    if (typeof TargetPacket !== "function") {
-      return false;
-    }
-
-    window.gameClient.player.setTarget(creature);
-    window.gameClient.send(new TargetPacket(creature.id));
-    return true;
-  }
-
-  function tick() {
-    if (!state.running) return;
-
-    try {
-      const now = Date.now();
-      const currentTarget = getCurrentTarget();
-
-      if (currentTarget) {
-        // Já tem alvo — só atualiza a "última vez visto" e segue o jogo.
-        state.lastTargetId = currentTarget.id;
-        state.lastSeenAt = now;
-      } else if (state.lastTargetId != null) {
-        const dentroDaMargem = (now - state.lastSeenAt) < Math.max(0, Number(config.graceMs) || 0);
-
-        if (dentroDaMargem) {
-          const creature = findCreatureById(state.lastTargetId);
-          if (creature) {
-            if (setTarget(creature)) {
-              state.lastSeenAt = now;
-              bot.log("lastTarget: alvo reencontrado e re-selecionado", {
-                id: creature.id,
-                name: creature.name || "Mob",
-              });
-            }
-          }
-          // Se não achou ainda, só continua esperando (dentro da margem).
-        } else {
-          bot.log("lastTarget: margem esgotada, esquecendo o alvo anterior");
-          state.lastTargetId = null;
-          state.lastSeenAt = 0;
-        }
-      }
-    } catch (erro) {
-      bot.log("lastTarget tick error", erro?.message || erro);
-    } finally {
-      state.timerId = window.setTimeout(tick, Math.max(100, Number(config.checkIntervalMs) || 300));
-    }
-  }
-
-  function start(overrides = {}) {
-    Object.assign(config, overrides, { enabled: true });
-    persistConfig();
-
-    if (state.running) {
-      bot.log("lastTarget already running");
-      return false;
-    }
-
-    state.running = true;
-    state.lastTargetId = null;
-    state.lastSeenAt = 0;
-    bot.log("lastTarget started", { ...config });
-    tick();
-    return true;
-  }
-
-  function stop(options = {}) {
-    state.running = false;
-
-    if (state.timerId != null) {
-      window.clearTimeout(state.timerId);
-      state.timerId = null;
-    }
-
-    if (options.persistEnabled !== false) {
-      config.enabled = false;
-      persistConfig();
-    }
-
-    state.lastTargetId = null;
-    state.lastSeenAt = 0;
-
-    bot.log("lastTarget stopped");
-    return true;
-  }
-
-  function status() {
-    return {
-      running: state.running,
-      config: { ...config },
-      lastTargetId: state.lastTargetId,
-      waiting: !getCurrentTarget() && state.lastTargetId != null,
-    };
-  }
-
-  function updateConfig(next = {}) {
-    if ("graceMs" in next) {
-      next.graceMs = Math.max(0, Math.trunc(Number(next.graceMs) || 0));
-    }
-    if ("checkIntervalMs" in next) {
-      next.checkIntervalMs = Math.max(100, Math.trunc(Number(next.checkIntervalMs) || 300));
-    }
-
-    Object.assign(config, next);
-    persistConfig();
-    return { ...config };
   }
 
   if (config.enabled) {
     start();
   }
 
-  bot.lasttarget = {
+  bot.Chatdetector = {
     start,
     stop,
     status,
     updateConfig,
+    addIgnored,
+    removeIgnored,
+    addWatched,
+    removeWatched,
   };
 
   bot.addCleanup(() => stop({ persistEnabled: false }));
 };
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
-
-window.__minibiaBotBundle.installProfilesModule = function installProfilesModule(bot) {
-  const profilesStorageKey = "minibiaBot.profiles.list";
-  const activeProfileStorageKey = "minibiaBot.profiles.active";
-
-  // ── Lista de todos os módulos e suas storage keys ─────────────────────────
-  const MODULE_CONFIGS = [
-    { name: "rune",        key: "minibiaBot.rune.config" },
-    { name: "heal",        key: "minibiaBot.heal.config" },
-    { name: "invisible",   key: "minibiaBot.invisible.config" },
-    { name: "magicShield", key: "minibiaBot.magicShield.config" },
-    { name: "attack",      key: "minibiaBot.attack.config" },
-    { name: "cave",        key: "minibiaBot.cave.config" },
-    { name: "equipRing",   key: "minibiaBot.equipRing.config" },
-    { name: "eat",         key: "minibiaBot.eat.config" },
-    { name: "talk",        key: "minibiaBot.talk.config" },
-    { name: "follow",      key: "minibiaBot.follow.config" },
-    { name: "runeCheck",   key: "minibiaBot.runeCheck.config" },
-    { name: "pz",          key: "minibiaBot.pz.home" },
-    { name: "xray",        key: "minibiaBot.xray.config" },
-    { name: "panic",       key: "minibiaBot.panic.config" },
-  ];
-
-  // ── storage helpers ───────────────────────────────────────────────────────
-
-  function loadProfiles() {
-    return bot.storage.get(profilesStorageKey, {}) || {};
-  }
-
-  function saveProfiles(profiles) {
-    bot.storage.set(profilesStorageKey, profiles);
-  }
-
-  function getActiveProfileName() {
-    return bot.storage.get(activeProfileStorageKey, null);
-  }
-
-  function setActiveProfileName(name) {
-    if (name) {
-      bot.storage.set(activeProfileStorageKey, name);
-    } else {
-      bot.storage.remove(activeProfileStorageKey);
-    }
-  }
-
-  // ── captura snapshot de todas as configs atuais ───────────────────────────
-
-  function captureSnapshot() {
-    const snapshot = {};
-    for (const { name, key } of MODULE_CONFIGS) {
-      try {
-        const raw = window.localStorage.getItem(key);
-        if (raw != null) {
-          snapshot[name] = JSON.parse(raw);
-        }
-      } catch (err) {
-        bot.log(`profiles: failed to read ${name} config`, err?.message || err);
-      }
-    }
-    return snapshot;
-  }
-
-  // ── aplica snapshot restaurando cada config no localStorage ──────────────
-
-  function applySnapshot(snapshot) {
-    if (!snapshot || typeof snapshot !== "object") return false;
-
-    for (const { name, key } of MODULE_CONFIGS) {
-      if (!Object.prototype.hasOwnProperty.call(snapshot, name)) continue;
-
-      try {
-        window.localStorage.setItem(key, JSON.stringify(snapshot[name]));
-      } catch (err) {
-        bot.log(`profiles: failed to restore ${name} config`, err?.message || err);
-      }
-    }
-
-    return true;
-  }
-
-  // ── API pública ───────────────────────────────────────────────────────────
-
-  function listProfiles() {
-    return Object.keys(loadProfiles()).sort();
-  }
-
-  function saveProfile(profileName) {
-    const name = String(profileName || "").trim();
-    if (!name) {
-      bot.log("profiles: profile name cannot be empty");
-      return false;
-    }
-
-    const profiles = loadProfiles();
-    profiles[name] = {
-      savedAt: Date.now(),
-      configs: captureSnapshot(),
-    };
-    saveProfiles(profiles);
-    setActiveProfileName(name);
-    bot.log(`profiles: saved "${name}"`, { modules: Object.keys(profiles[name].configs) });
-    return true;
-  }
-
-  function loadProfile(profileName) {
-    const name = String(profileName || "").trim();
-    if (!name) {
-      bot.log("profiles: profile name cannot be empty");
-      return false;
-    }
-
-    const profiles = loadProfiles();
-    const profile = profiles[name];
-    if (!profile) {
-      bot.log(`profiles: profile "${name}" not found`, { available: Object.keys(profiles) });
-      return false;
-    }
-
-    const applied = applySnapshot(profile.configs);
-    if (!applied) {
-      bot.log(`profiles: failed to apply "${name}"`);
-      return false;
-    }
-
-    setActiveProfileName(name);
-    bot.log(`profiles: loaded "${name}" — reloading bot...`);
-
-    // Recarrega o bot para aplicar as novas configs
-    window.setTimeout(() => {
-      window.minibiaBotReload?.();
-    }, 100);
-
-    return true;
-  }
-
-  function deleteProfile(profileName) {
-    const name = String(profileName || "").trim();
-    if (!name) return false;
-
-    const profiles = loadProfiles();
-    if (!Object.prototype.hasOwnProperty.call(profiles, name)) {
-      bot.log(`profiles: profile "${name}" not found`);
-      return false;
-    }
-
-    delete profiles[name];
-    saveProfiles(profiles);
-
-    if (getActiveProfileName() === name) {
-      setActiveProfileName(null);
-    }
-
-    bot.log(`profiles: deleted "${name}"`);
-    return true;
-  }
-
-  function renameProfile(oldName, newName) {
-    const from = String(oldName || "").trim();
-    const to = String(newName || "").trim();
-    if (!from || !to || from === to) return false;
-
-    const profiles = loadProfiles();
-    if (!profiles[from]) {
-      bot.log(`profiles: profile "${from}" not found`);
-      return false;
-    }
-
-    if (profiles[to]) {
-      bot.log(`profiles: profile "${to}" already exists`);
-      return false;
-    }
-
-    profiles[to] = profiles[from];
-    delete profiles[from];
-    saveProfiles(profiles);
-
-    if (getActiveProfileName() === from) {
-      setActiveProfileName(to);
-    }
-
-    bot.log(`profiles: renamed "${from}" → "${to}"`);
-    return true;
-  }
-
-  function exportProfile(profileName) {
-    const name = String(profileName || "").trim();
-    const profiles = loadProfiles();
-    const profile = name ? profiles[name] : null;
-    const data = name
-      ? (profile ? { [name]: profile } : null)
-      : profiles;
-
-    if (!data) {
-      bot.log(`profiles: profile "${name}" not found`);
-      return null;
-    }
-
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name ? `minibia-profile-${name}.json` : "minibia-profiles.json";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-
-    bot.log(`profiles: exported "${name || "all profiles"}"`);
-    return json;
-  }
-
-  function importProfiles(jsonString, overwrite = false) {
-    let data;
-    try {
-      data = JSON.parse(jsonString);
-    } catch (err) {
-      bot.log("profiles: import failed — invalid JSON", err?.message || err);
-      return false;
-    }
-
-    if (typeof data !== "object" || !data) {
-      bot.log("profiles: import failed — expected an object");
-      return false;
-    }
-
-    const profiles = loadProfiles();
-    let imported = 0;
-
-    for (const [name, profile] of Object.entries(data)) {
-      if (!name || typeof profile !== "object") continue;
-      if (!overwrite && profiles[name]) {
-        bot.log(`profiles: skipped "${name}" (already exists, use overwrite=true)`);
-        continue;
-      }
-      profiles[name] = profile;
-      imported++;
-    }
-
-    saveProfiles(profiles);
-    bot.log(`profiles: imported ${imported} profile(s)`);
-    return imported > 0;
-  }
-
-  function status() {
-    const names = listProfiles();
-    const active = getActiveProfileName();
-    return {
-      profiles: names,
-      activeProfile: active,
-      count: names.length,
-    };
-  }
-
-  bot.profiles = {
-    list: listProfiles,
-    save: saveProfile,
-    load: loadProfile,
-    delete: deleteProfile,
-    rename: renameProfile,
-    export: exportProfile,
-    import: importProfiles,
-    status,
-    getActiveProfileName,
-  };
-
-  bot.log("profiles module ready", {
-    profiles: listProfiles(),
-    active: getActiveProfileName(),
-  });
-};
-window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey  = "minibiaBot.ui.panelPosition";
@@ -8010,7 +8459,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     "minibiaBot.heal.config", "minibiaBot.rune.config", "minibiaBot.cave.config",
     "minibiaBot.attack.config", "minibiaBot.eat.config", "minibiaBot.invisible.config",
     "minibiaBot.magicShield.config", "minibiaBot.equipRing.config", "minibiaBot.follow.config",
-    "minibiaBot.talk.config", "minibiaBot.autoStack.config", "minibiaBot.autoRingByCap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
+    "minibiaBot.talk.config", "minibiaBot.autostack.config", "minibiaBot.autoringbycap.config", "minibiaBot.haste.config", "minibiaBot.friendHeal.config",
     "minibiaBot.autoSpell.config", "minibiaBot.distanceAttack.config",
     "minibiaBot.pz.home", "minibiaBot.panic.config",
     "minibiaBot.cave.route", "minibiaBot.cave.transitions", "minibiaBot.cave.presets",
@@ -8080,9 +8529,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function refreshAutoMagicShieldStatus() { const t=document.getElementById("minibia-bot-auto-magic-shield-enabled"); if(t) t.checked=!!bot.magicShield?.status?.().running; }
   function refreshAutoAttackStatus() { const t=document.getElementById("minibia-bot-auto-attack-enabled"); if(t) t.checked=!!bot.attack?.status?.().running; }
   function refreshEquipRingStatus() { const t=document.getElementById("minibia-bot-equip-ring-enabled"); if(t) t.checked=!!bot.equipRing?.status?.().running; }
-  function refreshAutoStackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autoStack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
-  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - haste:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
-  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoRingByCap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"💍 equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo • cap ${cap} • ${anel} • ${origem}`; }
+  function refreshautostackStatus() { const t=document.getElementById("minibia-bot-auto-stack-enabled"); const l=document.getElementById("minibia-bot-auto-stack-status"); const s=bot.autostack?.status?.(); if(t) t.checked=!!s?.running; if(l) l.textContent=s?.running?`Status: ativo • merges: ${s.merged}`:"Status: parado"; }
+  function refreshHasteStatus() { const t=document.getElementById("mb-haste-enabled"); const l=document.getElementById("mb-haste-status"); const s=bot.haste?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const g=s.gates; l.textContent=`Status: ativo - speed:${g.hasteactive?"sim":"nao"} - target:${g.targetonscreen?"sim":"nao"}`; }
+  function refreshCapRingStatus() { const t=document.getElementById("mb-capring-enabled"); const l=document.getElementById("mb-capring-status"); const s=bot.autoringbycap?.status?.(); if(t) t.checked=!!s?.running; if(!l||!s) return; if(!s.running){l.textContent="Status: parado";return;} const cap=s.currentCap!=null?s.currentCap:"?"; const anel=s.ringEquipped?"anel equipado":"sem anel"; const origem=s.ringOrigin?`origem: container ${s.ringOrigin.containerId??"?"} slot ${s.ringOrigin.slotIndex??"?"}`:"sem origem salva"; l.textContent=`Status: ativo - cap ${cap} - ${anel} - ${origem}`; }
   function refreshFollowStatus() {
     const t=document.getElementById("minibia-bot-follow-enabled"); const l=document.getElementById("minibia-bot-follow-status"); const s=bot.follow?.status?.();
     if(t) t.checked=!!s?.running;
@@ -8178,12 +8627,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const onMove=(clientX,clientY)=>{ if(!drag) return; const maxL=Math.max(0,window.innerWidth-panel.offsetWidth),maxT=Math.max(0,window.innerHeight-panel.offsetHeight); panel.style.left=`${Math.min(Math.max(0,clientX-drag.ox),maxL)}px`; panel.style.top=`${Math.min(Math.max(0,clientY-drag.oy),maxT)}px`; panel.style.right="auto"; };
     const endDrag=()=>{ if(!drag) return; drag=null; const r=panel.getBoundingClientRect(); savePanelPosition({left:r.left,top:r.top},key); };
 
-    // Mouse (PC)
     const onMouseMove=(e)=>onMove(e.clientX,e.clientY);
     handle.addEventListener("mousedown",(e)=>{ if(e.button!==0) return; startDrag(e.clientX,e.clientY); e.preventDefault(); });
     window.addEventListener("mousemove",onMouseMove); window.addEventListener("mouseup",endDrag);
 
-    // Touch (celular)
     handle.style.touchAction="none";
     const onTouchMove=(e)=>{ const t=e.touches[0]; if(!t) return; onMove(t.clientX,t.clientY); };
     handle.addEventListener("touchstart",(e)=>{ const t=e.touches[0]; if(!t) return; startDrag(t.clientX,t.clientY); }, {passive:true});
@@ -8280,7 +8727,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <div class="mb-tab" data-tab="extra">Extra</div>
         <div class="mb-tab" data-tab="tools">Tools</div>
         <div class="mb-tab" data-tab="chat">Chat</div>
-        <div class="mb-tab" data-tab="drop">Drop</div>
         <div class="mb-tab" data-tab="config">Config</div>
       </div>
       <div class="mb-body">
@@ -8324,7 +8770,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="mb-capring-enabled" /><span>Enable Auto Ring por Cap</span></label>
               <div class="mb-field-grid">
                 <div class="mb-field"><span class="mb-field-label">Tirar anel (cap &lt;)</span><input type="number" id="mb-capring-min" min="0" placeholder="200" /></div>
-                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap ≥)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
+                <div class="mb-field"><span class="mb-field-label">Colocar anel (cap &ge;)</span><input type="number" id="mb-capring-put" min="0" placeholder="300" /></div>
                 <div class="mb-field"><span class="mb-field-label">Cooldown (ms)</span><input type="number" id="mb-capring-cd" min="500" placeholder="1500" /></div>
               </div>
               <button type="button" class="mb-small-button mb-btn-full" id="mb-capring-clear-origin">Limpar origem salva do anel</button>
@@ -8336,7 +8782,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="mb-haste-enabled" /><span>Enable Haste</span></label>
               <div class="mb-field"><span class="mb-field-label">Spell</span><input type="text" id="mb-haste-spell" placeholder="utani hur" style="width:100%" /></div>
               <span class="mb-small-note" id="mb-haste-status">Status: parado</span>
-              <span class="mb-note">Detecta automatico pelo ID 17. Nao lanca com target na tela.</span>
+              <span class="mb-note">Detecta IDs 14 e 17. Nao lanca com target na tela.</span>
             </div>
           </div>
         </div>
@@ -8401,14 +8847,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-field"><span class="mb-field-label">Player Name</span><input type="text" id="minibia-bot-follow-target" placeholder="Name of player to follow" style="width:100%" /></div>
               <div class="mb-row"><span class="mb-field-label">Distance (sqm)</span><input type="number" id="minibia-bot-follow-distance" min="0" max="10" placeholder="2" style="width:50px" /></div>
               <span class="mb-small-note" id="minibia-bot-follow-status">Status: idle</span>
-            </div>
-          </div>
-          <div class="mb-group"><span class="mb-group-title">Sempre Atacar Último Alvo</span>
-            <div class="mb-stack">
-              <label class="mb-toggle"><input type="checkbox" id="mb-lasttarget-enabled" /><span>Ativar</span></label>
-              <div class="mb-field"><span class="mb-field-label">Margem de tolerância (ms)</span><input type="number" id="mb-lasttarget-grace" min="0" placeholder="8000" /></div>
-              <span class="mb-small-note" id="mb-lasttarget-status">Status: parado</span>
-              <span class="mb-note">Se o alvo sumir de vista, continua tentando o mesmo por esse tempo antes de desistir.</span>
             </div>
           </div>
         </div>
@@ -8543,33 +8981,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           </div>
         </div>
 
-        <!-- ABA: Drop -->
-        <div class="mb-tab-content" data-tab="drop">
-          <div class="mb-group"><span class="mb-group-title">Jogar Itens no Chão</span>
-            <div class="mb-stack">
-              <label class="mb-toggle"><input type="checkbox" id="mb-drop-enabled" /><span>Ativar</span></label>
-              <span class="mb-small-note" id="mb-drop-status">Status: parado</span>
-              <div class="mb-row-three">
-                <span class="mb-field-label">SID</span>
-                <input type="number" id="mb-drop-sid-input" placeholder="ex: 3031" />
-                <button type="button" class="mb-small-button" id="mb-drop-add">Add</button>
-              </div>
-              <div class="mb-list" id="mb-drop-list"></div>
-              <span class="mb-note">Itens com esse SID (em qualquer bag aberta) são jogados no chão automaticamente.</span>
-            </div>
-          </div>
-          <div class="mb-group"><span class="mb-group-title">Posição de Descarte</span>
-            <div class="mb-stack">
-              <span class="mb-small-note" id="mb-drop-position-status">Posição: onde eu estiver</span>
-              <div class="mb-actions-inline-two">
-                <button type="button" class="mb-small-button" id="mb-drop-record-position">Fixar posição atual</button>
-                <button type="button" class="mb-small-button" id="mb-drop-clear-position">Usar minha posição sempre</button>
-              </div>
-              <span class="mb-note">Se você fixar uma posição, os itens sempre caem ali, mesmo que você se mova.</span>
-            </div>
-          </div>
-        </div>
-
         <!-- ABA: Config -->
         <div class="mb-tab-content" data-tab="config">
           <div class="mb-group"><span class="mb-group-title">Profiles</span>
@@ -8621,7 +9032,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     switchTab(bot.storage.get(activeTabKey,"heal"));
 
     // Status bar
-    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autoStack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
+    const sbt=window.setInterval(()=>{const snap=bot.getPlayerSnapshot?.();const hpEl=document.getElementById("minibia-bot-status-hp");const mpEl=document.getElementById("minibia-bot-status-mana");const runEl=document.getElementById("minibia-bot-status-run");if(hpEl&&snap?.health!=null)hpEl.textContent="HP: "+snap.health+"/"+(snap.maxHealth||"?");if(mpEl&&snap?.mana!=null)mpEl.textContent="MP: "+snap.mana+"/"+(snap.maxMana||"?");if(runEl){const r=bot.rune?.status?.().running||bot.heal?.status?.().running||bot.attack?.status?.().running||bot.cave?.status?.().running||bot.autostack?.status?.().running;runEl.textContent=r?"Running":"Idle";runEl.style.color=r?"#006400":"#000";}},1000);
     bot.addCleanup(()=>window.clearInterval(sbt));
 
     // ── Collapse ──────────────────────────────────────────────
@@ -8700,23 +9111,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const asTickI=panel.querySelector("#minibia-bot-auto-stack-tick");
     const asNowB=panel.querySelector("#minibia-bot-auto-stack-now");
     const asEnabledI=panel.querySelector("#minibia-bot-auto-stack-enabled");
-    if(asTickI){asTickI.value=String(bot.autoStack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autoStack?.updateConfig?.({tickMs:v});});}
-    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autoStack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
-    if(asEnabledI){asEnabledI.checked=!!bot.autoStack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autoStack?.start?.({tickMs:t});else bot.autoStack?.stop?.();refreshAutoStackStatus();});}
+    if(asTickI){asTickI.value=String(bot.autostack?.config?.tickMs??2000);asTickI.addEventListener("change",()=>{const v=Math.max(500,Number(asTickI.value)||2000);asTickI.value=String(v);bot.autostack?.updateConfig?.({tickMs:v});});}
+    if(asNowB){asNowB.addEventListener("click",()=>{const m=bot.autostack?.runOnce?.();const l=document.getElementById("minibia-bot-auto-stack-status");if(l)l.textContent=`Agrupados: ${m??0} merge(s)`;});}
+    if(asEnabledI){asEnabledI.checked=!!bot.autostack?.status?.().running;asEnabledI.addEventListener("change",()=>{const t=Math.max(500,Number(asTickI?.value)||2000);if(asEnabledI.checked)bot.autostack?.start?.({tickMs:t});else bot.autostack?.stop?.();refreshautostackStatus();});}
 
-    // ── Auto Ring por Cap ─────────────────────────────────────
+    // ── Auto Ring por Cap ─────────────────────────────────────────────
     const capMinI=panel.querySelector("#mb-capring-min");
     const capPutI=panel.querySelector("#mb-capring-put");
     const capCdI=panel.querySelector("#mb-capring-cd");
     const capEnI=panel.querySelector("#mb-capring-enabled");
     const capClrB=panel.querySelector("#mb-capring-clear-origin");
-    if(capMinI){capMinI.value=String(bot.autoRingByCap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoRingByCap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
-    if(capPutI){capPutI.value=String(bot.autoRingByCap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoRingByCap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
-    if(capCdI){capCdI.value=String(bot.autoRingByCap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoRingByCap?.updateConfig?.({equipCooldownMs:v});});}
-    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoRingByCap?.clearOrigin?.();refreshCapRingStatus();});}
-    if(capEnI){capEnI.checked=!!bot.autoRingByCap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoRingByCap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoRingByCap?.stop?.();refreshCapRingStatus();});}
+    if(capMinI){capMinI.value=String(bot.autoringbycap?.config?.capMin??200);capMinI.addEventListener("change",()=>{const v=Math.max(0,Number(capMinI.value)||0);capMinI.value=String(v);bot.autoringbycap?.updateConfig?.({capMin:v});refreshCapRingStatus();});}
+    if(capPutI){capPutI.value=String(bot.autoringbycap?.config?.capPut??300);capPutI.addEventListener("change",()=>{const v=Math.max(0,Number(capPutI.value)||0);capPutI.value=String(v);bot.autoringbycap?.updateConfig?.({capPut:v});refreshCapRingStatus();});}
+    if(capCdI){capCdI.value=String(bot.autoringbycap?.config?.equipCooldownMs??1500);capCdI.addEventListener("change",()=>{const v=Math.max(500,Number(capCdI.value)||1500);capCdI.value=String(v);bot.autoringbycap?.updateConfig?.({equipCooldownMs:v});});}
+    if(capClrB){capClrB.addEventListener("click",()=>{bot.autoringbycap?.clearOrigin?.();refreshCapRingStatus();});}
+    if(capEnI){capEnI.checked=!!bot.autoringbycap?.status?.().running;capEnI.addEventListener("change",()=>{if(capEnI.checked)bot.autoringbycap?.start?.({capMin:Math.max(0,Number(capMinI?.value)||200),capPut:Math.max(0,Number(capPutI?.value)||300),equipCooldownMs:Math.max(500,Number(capCdI?.value)||1500)});else bot.autoringbycap?.stop?.();refreshCapRingStatus();});}
 
-    // ── Haste ────────────────────────────────────────────
+    // ── Haste ──────────────────────────────────────────────────
     const hasteSpellI=panel.querySelector("#mb-haste-spell");
     const hasteEnI=panel.querySelector("#mb-haste-enabled");
     if(hasteSpellI){hasteSpellI.value=bot.haste?.config?.spellwords??"utani hur";hasteSpellI.addEventListener("change",()=>{bot.haste?.updateconfig?.({spellwords:hasteSpellI.value.trim()});});}
@@ -8798,21 +9209,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(followTI){followTI.value=bot.follow?.config?.targetPlayerName||"";followTI.addEventListener("change",()=>{bot.follow?.updateConfig?.({targetPlayerName:followTI.value.trim()});refreshFollowStatus();});}
     if(followDI){followDI.value=String(bot.follow?.config?.followDistance??2);followDI.addEventListener("change",()=>{const d=Math.max(0,Math.min(10,Math.trunc(Number(followDI.value)||0)));followDI.value=String(d);bot.follow?.updateConfig?.({followDistance:d});refreshFollowStatus();});}
     if(followEI){followEI.checked=!!bot.follow?.status?.().running;followEI.addEventListener("change",()=>{const n=followTI?.value?.trim()||bot.follow?.config?.targetPlayerName||"";const d=Math.max(0,Math.min(10,Math.trunc(Number(followDI?.value)||2)));if(followEI.checked)bot.follow?.start?.({targetPlayerName:n,followDistance:d});else bot.follow?.stop?.();refreshFollowStatus();});}
-
-    // ── Sempre Atacar Último Alvo ──────────────────────────────
-    const ltEI=panel.querySelector("#mb-lasttarget-enabled");
-    const ltGraceI=panel.querySelector("#mb-lasttarget-grace");
-    const ltStatusL=panel.querySelector("#mb-lasttarget-status");
-    function refreshLastTargetStatus() {
-      const s=bot.lasttarget?.status?.();
-      if(ltEI) ltEI.checked=!!s?.running;
-      if(ltGraceI) ltGraceI.value=String(s?.config?.graceMs??8000);
-      if(ltStatusL) ltStatusL.textContent=s?.running?(s.waiting?"Status: ativo • esperando alvo reaparecer...":"Status: ativo"):"Status: parado";
-    }
-    if(ltGraceI){ltGraceI.addEventListener("change",()=>{const v=Math.max(0,Number(ltGraceI.value)||8000);ltGraceI.value=String(v);bot.lasttarget?.updateConfig?.({graceMs:v});});}
-    if(ltEI){ltEI.addEventListener("change",()=>{if(ltEI.checked)bot.lasttarget?.start?.({graceMs:Math.max(0,Number(ltGraceI?.value)||8000)});else bot.lasttarget?.stop?.();refreshLastTargetStatus();});}
-    const ltTid=window.setInterval(refreshLastTargetStatus,1000); bot.addCleanup(()=>window.clearInterval(ltTid));
-    refreshLastTargetStatus();
 
     // ── Cave ──────────────────────────────────────────────────
     panel.querySelector("#minibia-bot-cave-record")?.addEventListener("click",()=>{bot.cave.addWaypointCurrentSpot();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();});
@@ -8963,47 +9359,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     chatWatchAddB?.addEventListener("click",addChatWatch);
     chatWatchInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();addChatWatch();}});
 
-    // ── Drop Items ────────────────────────────────────────────
-    const dropEI=panel.querySelector("#mb-drop-enabled");
-    const dropStatusL=panel.querySelector("#mb-drop-status");
-    const dropSidInput=panel.querySelector("#mb-drop-sid-input");
-    const dropAddB=panel.querySelector("#mb-drop-add");
-    const dropPositionStatusL=panel.querySelector("#mb-drop-position-status");
-    const dropRecordPositionB=panel.querySelector("#mb-drop-record-position");
-    const dropClearPositionB=panel.querySelector("#mb-drop-clear-position");
-
-    function refreshDropStatus() {
-      const s=bot.dropitems?.status?.();
-      if(dropEI) dropEI.checked=!!s?.config?.enabled;
-      if(dropStatusL) dropStatusL.textContent=s?.running?`Status: ativo • total jogado: ${s.totalJogados||0}`:"Status: parado";
-      const pos=s?.config?.posicaoFixa;
-      if(dropPositionStatusL) dropPositionStatusL.textContent=pos?`Posição fixa: (${pos.x}, ${pos.y}, ${pos.z})`:"Posição: onde eu estiver";
-    }
-    function renderDropList() {
-      const list=panel.querySelector("#mb-drop-list"); if(!list) return;
-      const itens=bot.dropitems?.status?.()?.config?.itens||[];
-      list.innerHTML="";
-      if(!itens.length){const e=document.createElement("div");e.className="mb-small-note";e.textContent="Nenhum item na lista.";list.appendChild(e);return;}
-      itens.forEach((item,idx)=>{
-        const row=document.createElement("div"); row.className="mb-list-row";
-        const label=document.createElement("span"); label.textContent=`SID ${item.sid ?? "?"}${item.nome?" — "+item.nome:""}`;
-        const btn=document.createElement("button"); btn.type="button"; btn.className="mb-small-button"; btn.textContent="Remove";
-        btn.addEventListener("click",()=>{bot.dropitems?.removeItem?.(idx);renderDropList();});
-        row.appendChild(label); row.appendChild(btn); list.appendChild(row);
-      });
-    }
-    if(dropEI){dropEI.addEventListener("change",()=>{if(dropEI.checked)bot.dropitems?.start?.();else bot.dropitems?.stop?.();refreshDropStatus();});}
-    dropAddB?.addEventListener("click",()=>{
-      const sid=Number(dropSidInput?.value);
-      if(!Number.isFinite(sid)||sid<=0){window.alert("Digite um SID válido.");return;}
-      bot.dropitems?.addItem?.(sid,null,"");
-      if(dropSidInput)dropSidInput.value="";
-      renderDropList();
-    });
-    dropSidInput?.addEventListener("keydown",(e)=>{if(e.key==="Enter"){e.preventDefault();dropAddB?.click();}});
-    dropRecordPositionB?.addEventListener("click",()=>{bot.dropitems?.usarPosicaoAtual?.();refreshDropStatus();});
-    dropClearPositionB?.addEventListener("click",()=>{bot.dropitems?.limparPosicaoFixa?.();refreshDropStatus();});
-
     // ── Refresh inicial ───────────────────────────────────────
     refreshHomeLabel();refreshPanicStatus();refreshXrayStatus();
     renderGameMasterNames();renderTrustedNames();renderAttackTargetNames();
@@ -9012,12 +9367,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshCaveStatus();refreshEquipRingStatus();refreshTalkStatus();refreshCaveAutoRecordStatus();
     refreshProfilesPanel();refreshFollowStatus();refreshVisibleCreatures();
     refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();
-    refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
-    refreshDistanceAttackStatus();refreshChatStatus();renderChatIgnoreList();renderChatWatchList();refreshDropStatus();renderDropList();
+    refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();
+    refreshDistanceAttackStatus();refreshChatStatus();renderChatIgnoreList();renderChatWatchList();
 
     // ── Timers ────────────────────────────────────────────────
     const t1=window.setInterval(refreshVisibleCreatures,1000); bot.addCleanup(()=>window.clearInterval(t1));
-    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshAutoStackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();refreshChatStatus();refreshDropStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
+    const t2=window.setInterval(()=>{refreshTalkStatus();refreshFollowStatus();refreshProfilesPanel();refreshautostackStatus();refreshCapRingStatus();refreshHasteStatus();refreshFriendHealStatus();refreshAutoSpellStatus();refreshDistanceAttackStatus();refreshChatStatus();},1000); bot.addCleanup(()=>window.clearInterval(t2));
     const t3=window.setInterval(()=>{refreshCaveStatus();refreshCavePresetControls();refreshCaveClosestStatus();refreshCaveTransitionStatus();refreshCaveAutoRecordStatus();},1000); bot.addCleanup(()=>window.clearInterval(t3));
   }
 
@@ -9029,12 +9384,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     refreshAutoEatStatus, refreshCaveStatus, refreshCavePresetControls,
     refreshEquipRingStatus, refreshTalkStatus, refreshProfilesPanel,
     refreshFollowStatus, refreshVisibleCreatures, refreshCaveClosestStatus,
-    refreshCaveTransitionStatus, refreshAutoStackStatus, refreshCapRingStatus, refreshHasteStatus,
+    refreshCaveTransitionStatus, refreshautostackStatus, refreshCapRingStatus, refreshHasteStatus,
     refreshFriendHealStatus, refreshAutoSpellStatus, refreshDistanceAttackStatus,
     getSavedPanelPosition, getSavedPanelCollapsed,
     setPanelCollapsed:(collapsed)=>{const p=document.getElementById("minibia-bot-panel");setPanelCollapsed(p,collapsed);},
   };
 };
+
 (() => {
   const bundle = window.__minibiaBotBundle || window.__minibiaBotReloadBundle || {};
   const persistedEnabledModules = [
@@ -9048,15 +9404,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     ["eat",           "minibiaBot.eat.config"],
     ["talk",          "minibiaBot.talk.config"],
     ["follow",        "minibiaBot.follow.config"],
-    ["autoStack",     "minibiaBot.autoStack.config"],
-    ["autoRingByCap", "minibiaBot.autoRingByCap.config"],
-    ["haste",     "minibiaBot.haste.config"],
+    ["autostack",     "minibiaBot.autostack.config"],
+    ["autoringbycap", "minibiaBot.autoringbycap.config"],
+    ["haste",          "minibiaBot.haste.config"],
     ["friendHeal",    "minibiaBot.friendHeal.config"],
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
-    ["Chatdetector",              "minibiaBot.chatDetector.config"],
-    ["dropitems",                 "minibiaBot.dropItems.config"],
-    ["lasttarget",                "minibiaBot.lastTarget.config"],
   ];
 
   function getPersistedEnabledSnapshot(bot) {
@@ -9103,17 +9456,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installAutoEatModule(bot);
     currentBundle.installTalkModule(bot);
     currentBundle.installAutoFollowModule(bot);
-    currentBundle.installAutoStackModule(bot);
-    currentBundle.installAutoRingByCapModule(bot);
+    currentBundle.installautostackModule(bot);
+    currentBundle.installautoringbycapModule(bot);
     currentBundle.installastemodule(bot);
     currentBundle.installFriendHealModule(bot);
     currentBundle.installAutoSpellModule(bot);
     currentBundle.installDistanceAttackModule(bot);
     currentBundle.installMeleePositionModule(bot);
-    currentBundle.installChatdetectorModule(bot);
-    currentBundle.installDropitemsModule(bot);
-    currentBundle.installLasttargetModule(bot);
     currentBundle.installProfilesModule(bot);
+    currentBundle.installChatdetectorModule(bot);
     currentBundle.installPanel(bot);
 
     bot.ui.inject();
@@ -9122,32 +9473,28 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     bot.stop   = (...args) => bot.rune.stop(...args);
     bot.reload = () => window.minibiaBotReload?.();
     bot.status = () => ({
-      version        : bot.version,
-      pz             : { home: bot.pz.getHomePz() },
-      xray           : bot.xray.status(),
-      panic          : bot.panic.status(),
-      rune           : bot.rune.status(),
-      heal           : bot.heal.status(),
-      invisible      : bot.invisible.status(),
-      magicShield    : bot.magicShield.status(),
-      attack         : bot.attack.status(),
-      cave           : bot.cave.status(),
-      equipRing      : bot.equipRing.status(),
-      eat            : bot.eat.status(),
-      talk           : bot.talk.status(),
-      follow         : bot.follow.status(),
-      autoStack      : bot.autoStack.status(),
-      autoRingByCap  : bot.autoRingByCap.status(),
-      haste      : bot.haste.status(),
-      friendHeal     : bot.friendHeal.status(),
-      autoSpell      : bot.autoSpell.status(),
-      distanceAttack : bot.distanceAttack.status(),
-      meleePosition  : bot.meleePosition.status(),
-      Chatdetector  : bot.Chatdetector.status(),
-      dropitems      : bot.dropitems.status(),
-      lasttarget     : bot.lasttarget.status(),
-      profiles       : bot.profiles.status(),
-      
+      version:        bot.version,
+      pz:             { home: bot.pz.getHomePz() },
+      xray:           bot.xray.status(),
+      panic:          bot.panic.status(),
+      rune:           bot.rune.status(),
+      heal:           bot.heal.status(),
+      invisible:      bot.invisible.status(),
+      magicShield:    bot.magicShield.status(),
+      attack:         bot.attack.status(),
+      cave:           bot.cave.status(),
+      equipRing:      bot.equipRing.status(),
+      eat:            bot.eat.status(),
+      talk:           bot.talk.status(),
+      follow:         bot.follow.status(),
+      autostack:      bot.autostack.status(),
+      autoringbycap:  bot.autoringbycap.status(),
+      haste:          bot.haste.status(),
+      friendHeal:     bot.friendHeal.status(),
+      autoSpell:      bot.autoSpell.status(),
+      distanceAttack:  bot.distanceAttack.status(),
+      meleePosition:   bot.meleePosition.status(),
+      profiles:        bot.profiles.status(),
     });
 
     window.minibiaBot = bot;
