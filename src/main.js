@@ -18,6 +18,8 @@
     ["autoSpell",     "minibiaBot.autoSpell.config"],
     ["distanceAttack","minibiaBot.distanceAttack.config"],
     ["Chatdetector",              "minibiaBot.chatDetector.config"],
+    ["dropitems",                 "minibiaBot.dropItems.config"],
+    ["lasttarget",                "minibiaBot.lastTarget.config"],
   ];
 
   function getPersistedEnabledSnapshot(bot) {
@@ -72,6 +74,8 @@
     currentBundle.installDistanceAttackModule(bot);
     currentBundle.installMeleePositionModule(bot);
     currentBundle.installChatdetectorModule(bot);
+    currentBundle.installDropitemsModule(bot);
+    currentBundle.installLasttargetModule(bot);
     currentBundle.installProfilesModule(bot);
     currentBundle.installPanel(bot);
 
@@ -103,6 +107,8 @@
       distanceAttack : bot.distanceAttack.status(),
       meleePosition  : bot.meleePosition.status(),
       Chatdetector  : bot.Chatdetector.status(),
+      dropitems      : bot.dropitems.status(),
+      lasttarget     : bot.lasttarget.status(),
       profiles       : bot.profiles.status(),
       
     });
