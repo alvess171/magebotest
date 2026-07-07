@@ -20,6 +20,8 @@ cat \
   src/modules/auto-ring-by-cap.js \
   src/modules/haste.js \
   src/modules/Chatdetector.js \
+  src/modules/dropitems.js \
+  src/modules/lasttarget.js \
   src/modules/profiles.js \
   src/ui/panel.js \
   src/main.js \
