@@ -16,10 +16,10 @@ window.__minibiaBotBundle.installAutoFollowModule = function installAutoFollowMo
 
   const config = Object.assign(
     {
-      tickMs: 250,
+      tickMs: 50,
       targetPlayerName: "",   // nome do player a seguir
       followDistance: 2,      // distância desejada em sqm (Chebyshev)
-      moveCooldownMs: 400,    // mínimo entre pathfinds consecutivos
+      moveCooldownMs: 50,    // mínimo entre pathfinds consecutivos
       lostTargetMs: 5000,     // ms sem ver o target antes de parar de mover
       maxFollowDistance: 10,  // distância máxima para considerar target visível
       enabled: false,
