@@ -8558,11 +8558,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   }
   function refreshCaveClosestStatus() { const l=document.getElementById("minibia-bot-cave-closest"); if(!l) return; const pos=bot.getPlayerPosition?.(); const route=bot.cave?.getRoute?.()||[]; if(!pos){l.textContent="Closest: no position";return;} if(!route.filter(w=>w?.type!=="delay").length){l.textContent="Closest: no waypoints";return;} const idx=bot.cave?.findClosestWaypointIndex?.(pos)??0; const w=route[idx]; l.textContent=w?`Closest: ${idx+1}. ${w.x},${w.y},${w.z}`:"Closest: unavailable"; }
   function refreshCaveTransitionStatus() { const l=document.getElementById("minibia-bot-cave-transition-status"); if(!l) return; const t=bot.cave?.getTransitions?.()||[]; if(!t.length){l.textContent="Transitions: none";return;} const lt=t.slice().sort((a,b)=>Number(b?.lastSeenAt||0)-Number(a?.lastSeenAt||0))[0]; if(!lt?.from||!lt?.to){l.textContent=`Transitions: ${t.length}`;return;} const ex=t.length>1?` (+${t.length-1})`:""; l.textContent=`Transitions: ${lt.from.x},${lt.from.y},${lt.from.z} → ${lt.to.x},${lt.to.y},${lt.to.z}${ex}`; }
-  function refreshProfilesPanel() {
-    const al=document.getElementById("minibia-bot-profiles-active"); const sel=document.getElementById("minibia-bot-profiles-select"); const ni=document.getElementById("minibia-bot-profiles-name-input");
+ function refreshProfilesPanel() {
+    const al=document.getElementById("minibia-bot-profiles-active"); const sel=document.getElementById("minibia-bot-profiles-select");
     const s=bot.profiles?.status?.(); const profiles=s?.profiles||[]; const active=s?.activeProfile||null;
     if(al) al.textContent=active?`Active: ${active}`:"Active: none";
-    if(sel) { const prev=sel.value; sel.innerHTML=""; if(!profiles.length){const o=document.createElement("option");o.value="";o.textContent="No profiles";sel.appendChild(o);sel.disabled=true;}else{sel.disabled=false;profiles.forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;sel.appendChild(o)});const ts=profiles.includes(active)?active:profiles.includes(prev)?prev:profiles[0];if(ts){sel.value=ts;if(ni&&!ni.value)ni.value=ts;}} }
+    if(sel) {
+      const prev=sel.value;
+      sel.innerHTML="";
+      if(!profiles.length){
+        const o=document.createElement("option");o.value="";o.textContent="No profiles";sel.appendChild(o);sel.disabled=true;
+      } else {
+        sel.disabled=false;
+        profiles.forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;sel.appendChild(o)});
+        // Prioriza a seleção atual do usuário (prev) sobre o perfil ativo (active) —
+        // só usa "active" como fallback se a seleção atual não for mais válida.
+        const ts=profiles.includes(prev)?prev:(profiles.includes(active)?active:profiles[0]);
+        if(ts) sel.value=ts;
+      }
+    }
   }
   function refreshFriendHealStatus() {
     const t=document.getElementById("minibia-bot-friend-heal-enabled"); const l=document.getElementById("minibia-bot-friend-heal-status"); const s=bot.friendHeal?.status?.();
