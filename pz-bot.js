@@ -9391,6 +9391,91 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   };
 };
 
+function applyProfilesPanelFix(bot) {
+  function refreshProfilesPanelFixed() {
+    const al = document.getElementById("minibia-bot-profiles-active");
+    const sel = document.getElementById("minibia-bot-profiles-select");
+    const s = bot.profiles?.status?.();
+    const profiles = s?.profiles || [];
+    const active = s?.activeProfile || null;
+
+    if (al) al.textContent = active ? `Active: ${active}` : "Active: none";
+
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = "";
+      if (!profiles.length) {
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = "No profiles";
+        sel.appendChild(o);
+        sel.disabled = true;
+      } else {
+        sel.disabled = false;
+        profiles.forEach((n) => {
+          const o = document.createElement("option");
+          o.value = n;
+          o.textContent = n;
+          sel.appendChild(o);
+        });
+        const ts = profiles.includes(active) ? active : profiles.includes(prev) ? prev : profiles[0];
+        if (ts) sel.value = ts;
+        // Removido: preenchimento automático do campo de nome a cada refresh
+      }
+    }
+  }
+
+  bot.ui.refreshProfilesPanel = refreshProfilesPanelFixed;
+
+  const prSelI = document.getElementById("minibia-bot-profiles-select");
+  const prNameI = document.getElementById("minibia-bot-profiles-name-input");
+  if (!prSelI || !prNameI) return;
+
+  const freshSel = prSelI.cloneNode(true);
+  prSelI.parentNode.replaceChild(freshSel, prSelI);
+
+  freshSel.addEventListener("change", () => {
+    if (prNameI && freshSel.value) {
+      prNameI.value = freshSel.value;
+    }
+  });
+
+  const prLoadB = document.getElementById("minibia-bot-profiles-load");
+  const prDelB = document.getElementById("minibia-bot-profiles-delete");
+  const prExpB = document.getElementById("minibia-bot-profiles-export");
+
+  if (prLoadB) {
+    const freshLoadB = prLoadB.cloneNode(true);
+    prLoadB.parentNode.replaceChild(freshLoadB, prLoadB);
+    freshLoadB.addEventListener("click", () => {
+      const n = freshSel.value || prNameI?.value?.trim() || "";
+      if (!n) { alert("Select a profile to load."); return; }
+      bot.profiles?.load?.(n);
+    });
+  }
+
+  if (prDelB) {
+    const freshDelB = prDelB.cloneNode(true);
+    prDelB.parentNode.replaceChild(freshDelB, prDelB);
+    freshDelB.addEventListener("click", () => {
+      const n = freshSel.value || "";
+      if (!n) return;
+      if (!confirm("Delete profile: " + n + "?")) return;
+      bot.profiles?.delete?.(n);
+      if (prNameI) prNameI.value = "";
+      refreshProfilesPanelFixed();
+    });
+  }
+
+  if (prExpB) {
+    const freshExpB = prExpB.cloneNode(true);
+    prExpB.parentNode.replaceChild(freshExpB, prExpB);
+    freshExpB.addEventListener("click", () => {
+      bot.profiles?.export?.(freshSel.value || null);
+    });
+  }
+}
+
 (() => {
   const bundle = window.__minibiaBotBundle || window.__minibiaBotReloadBundle || {};
   const persistedEnabledModules = [
@@ -9468,6 +9553,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installPanel(bot);
 
     bot.ui.inject();
+
+    bot.ui.inject();
+    applyProfilesPanelFix(bot);
 
     bot.start  = (...args) => bot.rune.start(...args);
     bot.stop   = (...args) => bot.rune.stop(...args);
