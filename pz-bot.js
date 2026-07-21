@@ -6766,7 +6766,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     {
       tickMs   : 2000,
       maxStack : 100,
-      targetBagIndex: 0, // 0 = primeira bag, 1 = segunda, etc.
+      targetBagIndex: 1, // 0 = primeira bag, 1 = segunda, etc.
       enabled  : false,
     },
     bot.storage.get(configStorageKey, {})
