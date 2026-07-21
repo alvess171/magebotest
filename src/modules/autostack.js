@@ -1,13 +1,14 @@
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
-window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModule(bot) {
+window.__minibiaBotBundle.installautostackModule = function installautostackModule(bot) {
 
-  const configStorageKey = "minibiaBot.autoStack.config";
+  const configStorageKey = "minibiaBot.autostack.config";
 
   const config = Object.assign(
     {
       tickMs   : 2000,
       maxStack : 100,
+      targetBagIndex: 1, // 0 = primeira bag, 1 = segunda, etc.
       enabled  : false,
     },
     bot.storage.get(configStorageKey, {})
@@ -25,8 +26,10 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
     return Array.from(window.gameClient?.player?.__openedContainers || []);
   }
 
-  function getFirstContainer() {
-    return getOpenContainers()[0] || null;
+  function getTargetContainer() {
+    const containers = getOpenContainers();
+    const index = Math.max(0, Math.trunc(Number(config.targetBagIndex) || 0));
+    return containers[index] || null;
   }
 
   function getItemDef(item) {
@@ -87,7 +90,7 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
   }
 
   function runStack() {
-    const first = getFirstContainer();
+    const first = getTargetContainer();
     if (!first) return 0;
 
     const runeSlots = getRuneSlots();
@@ -209,6 +212,7 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
   function updateConfig(next = {}) {
     if ("tickMs"   in next) next.tickMs   = Math.max(500, Number(next.tickMs)   || 2000);
     if ("maxStack" in next) next.maxStack = Math.max(2,   Number(next.maxStack) || 100);
+    if ("targetBagIndex" in next) next.targetBagIndex = Math.max(0, Math.trunc(Number(next.targetBagIndex) || 0));
     Object.assign(config, next);
     persistConfig();
     bot.log("autostack config updated", { ...config });
@@ -217,5 +221,5 @@ window.__minibiaBotBundle.installAutoStackModule = function installAutoStackModu
 
   if (config.enabled) start();
 
-  bot.autoStack = { start, stop, runOnce, status, updateConfig, config };
+  bot.autostack = { start, stop, runOnce, status, updateConfig, config };
 };
