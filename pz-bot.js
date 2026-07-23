@@ -2264,6 +2264,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       meleeMode: true,
       meleeFollow: true,   // false = ataca sem perseguir (fica parado)
       meleeNoFollowRange: 1, // alcance usado SÓ quando o follow está desligado
+      meleeOrtogonal: false, // true = só N/S/L/O, nunca diagonal
       targetNames: [],
       skillTrainOnMonster: false,
       skillTrainRetargetMs: 50,
@@ -2394,6 +2395,35 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const dx = Math.abs(Number(from.x) - Number(to.x));
     const dy = Math.abs(Number(from.y) - Number(to.y));
     return (dx !== 0 || dy !== 0) && dx <= 1 && dy <= 1;
+  }
+
+  // Ortogonal = exatamente 1 tile em UM eixo só (Norte/Sul/Leste/Oeste).
+  // Diagonal não conta.
+  function isOrtogonalTile(from, to) {
+    if (!from || !to || Number(from.z) !== Number(to.z)) return false;
+    const dx = Math.abs(Number(from.x) - Number(to.x));
+    const dy = Math.abs(Number(from.y) - Number(to.y));
+    return (dx === 1 && dy === 0) || (dx === 0 && dy === 1);
+  }
+
+  // Posição considerada "no lugar" pro melee, conforme a config
+  function estaNaPosicaoMelee(from, to) {
+    return config.meleeOrtogonal ? isOrtogonalTile(from, to) : isAdjacentTile(from, to);
+  }
+
+  const OFFSETS_ORTOGONAIS = [
+    { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
+  ];
+  const OFFSETS_DIAGONAIS = [
+    { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
+  ];
+
+  function getMeleeOffsets() {
+    // Ortogonal ligado: NUNCA usa diagonal, mesmo que seja o único caminho —
+    // é o que "força a encontrar a direção" N/S/L/O.
+    return config.meleeOrtogonal
+      ? [...OFFSETS_ORTOGONAIS]
+      : [...OFFSETS_ORTOGONAIS, ...OFFSETS_DIAGONAIS];
   }
 
   function getTileDistance(from, to) {
@@ -2667,7 +2697,12 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   function estaNoAlcanceSemFollow(monster, playerPosition) {
     const targetPosition = normalizePosition(monster?.getPosition?.() || monster?.__position);
     if (!playerPosition || !targetPosition || playerPosition.z !== targetPosition.z) return false;
-    return getTileDistance(playerPosition, targetPosition) <= getNoFollowRange();
+    const alcance = getNoFollowRange();
+    // Parado + ortogonal + alcance 1: só engaja quem está em N/S/L/O
+    if (config.meleeOrtogonal && alcance === 1) {
+      return isOrtogonalTile(playerPosition, targetPosition);
+    }
+    return getTileDistance(playerPosition, targetPosition) <= alcance;
   }
 
   function getMonsterCandidates(now = Date.now()) {
@@ -2828,10 +2863,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return null;
     }
 
-    const offsets = [
-      { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
-      { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
-    ];
+    const offsets = getMeleeOffsets();
 
     offsets.sort((a, b) => {
       const da = Math.abs(targetPosition.x + a.x - playerPosition.x) +
@@ -2907,7 +2939,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const giveUpDelayMs = Math.max(5000, (Number(config.tickMs) || 0) * 10);
 
-    if (isAdjacentTile(playerPosition, targetPosition)) {
+    // Com ortogonal ligado, estar na diagonal NÃO conta como chegou —
+    // ele continua se reposicionando até ficar em N/S/L/O.
+    if (estaNaPosicaoMelee(playerPosition, targetPosition)) {
       state.lastChaseDestinationKey = null;
       clearCurrentFollowTarget();
       resetFollowProgress();
@@ -3204,6 +3238,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
         250,
         Math.trunc(Number(nextConfig.skillTrainRetargetMs) || config.skillTrainRetargetMs || 1500)
       );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "meleeOrtogonal")) {
+      nextConfig.meleeOrtogonal = !!nextConfig.meleeOrtogonal;
     }
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "meleeNoFollowRange")) {
@@ -8310,6 +8348,16 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     followRow.appendChild(document.createTextNode("↳ Perseguir o alvo (auto-follow)"));
     wrap.appendChild(followRow);
     wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:0 0 6px 20px; line-height:1.5;", "Marcado: anda atrás do monstro até encostar. Desmarcado: fica parado e só engaja quem entrar no alcance abaixo."));
+
+    const ortoRow = el("label", "display:flex; align-items:center; gap:6px; margin:0 0 4px 20px; cursor:pointer; color:#ccc; font-size:11px;");
+    const ortoCheckbox = el("input");
+    ortoCheckbox.type = "checkbox";
+    ortoCheckbox.checked = !!bot.attack.config.meleeOrtogonal;
+    ortoCheckbox.onchange = () => bot.attack.updateConfig({ meleeOrtogonal: ortoCheckbox.checked });
+    ortoRow.appendChild(ortoCheckbox);
+    ortoRow.appendChild(document.createTextNode("↳ Só Norte/Sul/Leste/Oeste (sem diagonal)"));
+    wrap.appendChild(ortoRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:0 0 8px 20px; line-height:1.5;", "Marcado: ficar na diagonal NÃO conta como chegou — ele se reposiciona até ficar em linha reta com o monstro."));
 
     const noFollowWrap = el("div", "margin:0 0 8px 20px;");
     noFollowWrap.appendChild(makeField("↳ Alcance sem perseguir (sqm)", bot.attack.config.meleeNoFollowRange ?? 1, (v) => {
