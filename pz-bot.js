@@ -6386,6 +6386,9 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     lastReplyAt: 0,
     seenKeys: [],
     seenSignatures: [],
+    mudoPorGm: false,
+    erros429: 0,
+    backoffAte: 0,
   };
   const greetingReplies = ["yo", "sup", "hey", "hiya", "yo lol"];
   const agreeReplies = ["true", "fr", "based", "ya", "real"];
@@ -6400,6 +6403,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     model: defaultModel,
     pollMs: minPollMs,
     replyCooldownMs: 1500,
+    responderTodos: true,   // true = responde qualquer um, inclusive GM
     systemPrompt: defaultSystemPrompt,
     greetingPrompt: defaultGreetingPrompt,
     questionPrompt: defaultQuestionPrompt,
@@ -6593,6 +6597,30 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return trustedNames.includes(senderName);
   }
 
+  // NUNCA responder a Game Master. É o teste clássico pra flagrar bot:
+  // o GM fala com você e espera resposta automática.
+  function isGameMasterSender(message) {
+    if (config.responderTodos) return false; // opção: falar com todos
+    const senderName = normalizeText(message?.sender);
+    if (!senderName) return false;
+    try {
+      const gms = bot.panic?.getGameMasterNames?.() || [];
+      if (gms.includes(senderName)) return true;
+      // Heurística extra: nomes de staff costumam ter marcador
+      if (/\b(god|gm|cm|tutor|admin|gamemaster|game master)\b/i.test(senderName)) return true;
+    } catch {}
+    return false;
+  }
+
+  // Se tem QUALQUER GM na tela, o bot fica calado — mesmo que quem
+  // tenha falado seja outra pessoa.
+  function hasVisibleGameMaster() {
+    if (config.responderTodos) return false; // opção: falar com todos
+    try {
+      return (bot.panic?.getVisibleGameMasters?.() || []).length > 0;
+    } catch { return false; }
+  }
+
   function isNpcMessage(message) {
     const npcType = window.CONST?.TYPES?.NPC;
     return npcType != null && message?.senderType === npcType;
@@ -6649,7 +6677,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
         return false;
       }
 
-      if (!message.sender || isSelfMessage(message) || isNpcMessage(message) || isTrustedSender(message)) {
+      if (!message.sender || isSelfMessage(message) || isNpcMessage(message) || isTrustedSender(message) || isGameMasterSender(message)) {
         rememberSeenMessage(message);
         return false;
       }
@@ -6755,8 +6783,22 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
 
     if (!response.ok) {
       const errorText = await response.text();
+
+      // 429 = limite da API estourado. Backoff progressivo pra parar de
+      // martelar o endpoint (o log enchia de "Failed to load resource 429").
+      if (response.status === 429 || response.status === 503) {
+        state.erros429 = (state.erros429 || 0) + 1;
+        const espera = Math.min(600000, 30000 * Math.pow(2, state.erros429 - 1)); // 30s, 1m, 2m... até 10m
+        state.backoffAte = Date.now() + espera;
+        bot.log("talk: limite da API (" + response.status + ") — pausando " +
+                Math.round(espera / 1000) + "s");
+      }
+
       throw new Error(`Gemini request failed (${response.status}): ${errorText}`);
     }
+
+    state.erros429 = 0;
+    state.backoffAte = 0;
 
     const data = await response.json();
     return (
@@ -6890,6 +6932,26 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       return false;
     }
 
+    // GM na tela = silêncio total. Responder aqui é o jeito mais rápido
+    // de se entregar.
+    if (hasVisibleGameMaster()) {
+      if (!state.mudoPorGm) {
+        state.mudoPorGm = true;
+        bot.log("talk: GM na tela — parei de responder");
+        bot.playAlarm?.();
+      }
+      // marca tudo como visto pra não responder depois que o GM sair
+      rememberSeenMessages(getDefaultMessages());
+      return false;
+    }
+    state.mudoPorGm = false;
+
+    // Backoff: a API devolve 429 quando estoura o limite. Sem isso o
+    // módulo fica martelando o endpoint a cada segundo.
+    if (Date.now() < (state.backoffAte || 0)) {
+      return false;
+    }
+
     if (Date.now() - state.lastReplyAt < config.replyCooldownMs) {
       return false;
     }
@@ -7015,6 +7077,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       running: state.running,
       pending: state.pending,
       lastReplyAt: state.lastReplyAt,
+      mudoPorGm: state.mudoPorGm,
+      backoffAte: state.backoffAte || 0,
       config: {
         ...config,
         apiKey: config.apiKey ? "***configured***" : "",
@@ -8666,6 +8730,16 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       bot.talk.updateConfig({ replyCooldownMs: Math.max(0, Number(v) || 1500) }); 
     }, "number"));
 
+    const todosRow = el("label", "display:flex; align-items:center; gap:6px; margin:8px 0 4px; cursor:pointer; color:#ccc; font-size:11px;");
+    const todosCheckbox = el("input");
+    todosCheckbox.type = "checkbox";
+    todosCheckbox.checked = !!bot.talk.config.responderTodos;
+    todosCheckbox.onchange = () => bot.talk.updateConfig({ responderTodos: todosCheckbox.checked });
+    todosRow.appendChild(todosCheckbox);
+    todosRow.appendChild(document.createTextNode("Responder a todos, sem exceção"));
+    wrap.appendChild(todosRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Desmarcado, ele fica calado com Game Master na tela e não responde nomes da lista de GM."));
+
     wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-top:8px; margin-bottom:4px;", "📝 Prompts Customizáveis:"));
 
     const expandBtn = el("button", "width:100%; padding:5px; margin-bottom:6px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "▼ Mostrar prompts customizáveis");
@@ -9233,12 +9307,22 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     if (talkStatusEl && bot.talk) {
       const s = bot.talk.status();
       const apiKey = s.config?.apiKey;
-      talkStatusEl.textContent = !apiKey
-        ? "⚠ Sem API Key configurada"
-        : s.running
-          ? "● Rodando (respondendo auto)"
-          : "○ Parado";
-      talkStatusEl.style.color = !apiKey ? "#e77" : s.running ? "#5c5" : "#999";
+      const emBackoff = s.backoffAte && Date.now() < s.backoffAte;
+      if (s.mudoPorGm) {
+        talkStatusEl.textContent = "🚨 GM na tela — CALADO";
+        talkStatusEl.style.color = "#f55";
+      } else if (emBackoff) {
+        talkStatusEl.textContent = "⏳ Limite da API — volta em " +
+          Math.ceil((s.backoffAte - Date.now()) / 1000) + "s";
+        talkStatusEl.style.color = "#fc5";
+      } else {
+        talkStatusEl.textContent = !apiKey
+          ? "⚠ Sem API Key configurada"
+          : s.running
+            ? "● Rodando (respondendo auto)"
+            : "○ Parado";
+        talkStatusEl.style.color = !apiKey ? "#e77" : s.running ? "#5c5" : "#999";
+      }
     }
 
     // ── Chat ──
