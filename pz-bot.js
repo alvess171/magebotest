@@ -1165,10 +1165,15 @@
 
     function persist() { bot.storage.set(KEY, { ...config }); }
 
-    function start() {
+    function start(tentativa = 0) {
       if (state.active) return;
       const renderer = window.gameClient?.renderer;
       if (!renderer || typeof renderer.addDistanceAnimation !== "function" || typeof renderer.addPositionAnimation !== "function") {
+        // O renderer pode não existir ainda no boot — tenta de novo
+        if (tentativa < 20) {
+          window.setTimeout(() => start(tentativa + 1), 500);
+          return;
+        }
         log("hide spell animations: renderer não disponível ainda");
         return;
       }
@@ -6097,7 +6102,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     });
   }
 
-  function start() {
+  function start(tentativa = 0) {
     config.enabled = true;
     persistConfig();
 
@@ -6107,6 +6112,11 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     }
 
     if (!window.gameClient) {
+      // gameClient pode não existir ainda no boot — tenta de novo
+      if (tentativa < 20) {
+        window.setTimeout(() => start(tentativa + 1), 500);
+        return false;
+      }
       bot.log("chat detector cannot start: gameClient not ready");
       return false;
     }
@@ -8528,20 +8538,109 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
 
   buildPanel();
 
-  // Retoma módulos que estavam ativos antes (persistidos)
-  if (Rune.config.enabled) Rune.start();
-  if (Haste.config.enabled) Haste.start();
-  if (Eat.config.enabled) Eat.start();
-  if (Ring.config.enabled) Ring.start();
-  if (Monk.config.enabled) Monk.start();
-  if (Stones.config.enabled) Stones.start();
-  if (Panic.config.enabled) Panic.start();
-  if (Heal.config.enabled) Heal.start();
-  if (Invisible.config.enabled) Invisible.start();
-  if (MagicShield.config.enabled) MagicShield.start();
-  if (Follow.config.enabled) Follow.start();
-  if (FriendHeal.config.enabled) FriendHeal.start();
-  if (LastTarget.config.enabled) LastTarget.start();
+  // ── BOOT ESCALONADO ────────────────────────────────────────
+  // Antes tudo tentava iniciar de imediato. Módulos que dependem do
+  // gameClient/renderer (chat detector, hide spell animations, cave,
+  // attack...) falhavam em silêncio se o jogo ainda estava carregando.
+  // Agora: espera o jogo ficar pronto e liga um de cada vez.
+  const BOOT_STEP_MS = 250;
+
+  function isGameReady() {
+    return !!(window.gameClient && window.gameClient.player && window.gameClient.renderer);
+  }
+
+  function whenGameReady(callback, timeoutMs = 60000) {
+    const startedAt = Date.now();
+    (function check() {
+      if (isGameReady()) { callback(); return; }
+      if (Date.now() - startedAt > timeoutMs) {
+        log("boot: gameClient não ficou pronto a tempo — seguindo assim mesmo");
+        callback();
+        return;
+      }
+      window.setTimeout(check, 200);
+    })();
+  }
+
+  function modIsRunning(mod) {
+    if (!mod) return false;
+    if (typeof mod.status === "function") {
+      try { return !!mod.status().running; } catch { return false; }
+    }
+    return !!mod.running;
+  }
+
+  function modIsEnabled(mod) {
+    if (!mod) return false;
+    if (mod.config && "enabled" in mod.config) return !!mod.config.enabled;
+    if (typeof mod.status === "function") {
+      try { return !!mod.status().config?.enabled; } catch { return false; }
+    }
+    return false;
+  }
+
+  // Ordem importa: os que outros módulos consultam vêm primeiro
+  function getBootJobs() {
+    return [
+      ["Heal", Heal], ["Rune", Rune], ["Haste", Haste], ["Eat", Eat], ["Ring", Ring],
+      ["Monk", Monk], ["Stones", Stones], ["Panic", Panic],
+      ["Invisible", Invisible], ["MagicShield", MagicShield],
+      ["Follow", Follow], ["FriendHeal", FriendHeal], ["LastTarget", LastTarget],
+      ["Attack", bot.attack], ["Cave", bot.cave], ["Drop", bot.drop],
+      ["UhPlayer", bot.uhPlayer], ["ChatDetector", bot.Chatdetector],
+      ["PerformanceMode", PerformanceMode], ["HideSpellAnimations", HideSpellAnimations],
+      ["ZoomBlocker", ZoomBlocker], ["SwipeNavBlocker", SwipeNavBlocker],
+      // Talk fica de fora de propósito — só liga pelo botão
+    ];
+  }
+
+  function bootModules(onDone) {
+    const jobs = getBootJobs();
+    let index = 0;
+    const iniciados = [];
+
+    (function next() {
+      if (index >= jobs.length) {
+        log("boot concluído", { iniciados });
+        updatePanel();
+        onDone?.();
+        return;
+      }
+
+      const [name, mod] = jobs[index++];
+      try {
+        if (mod && modIsEnabled(mod) && !modIsRunning(mod)) {
+          mod.start();
+          if (modIsRunning(mod)) iniciados.push(name);
+          else log("boot: " + name + " não subiu, será tentado de novo");
+        }
+      } catch (error) {
+        log("boot: falha em " + name, error?.message || error);
+      }
+
+      window.setTimeout(next, BOOT_STEP_MS);
+    })();
+  }
+
+  // Segunda passada: pega o que ficou pra trás (renderer que demorou etc.)
+  function bootRetry(tentativasRestantes = 3) {
+    if (tentativasRestantes <= 0) return;
+    window.setTimeout(() => {
+      const pendentes = getBootJobs().filter(([, mod]) => mod && modIsEnabled(mod) && !modIsRunning(mod));
+      if (!pendentes.length) return;
+      log("boot: repescagem", { pendentes: pendentes.map(([n]) => n) });
+      pendentes.forEach(([name, mod]) => {
+        try { mod.start(); } catch (e) { log("boot retry: falha em " + name, e?.message || e); }
+      });
+      updatePanel();
+      bootRetry(tentativasRestantes - 1);
+    }, 3000);
+  }
+
+  whenGameReady(() => {
+    log("boot: gameClient pronto, iniciando módulos...");
+    bootModules(() => bootRetry());
+  });
 
   // Talk NÃO inicia sozinho — ative pelo botão "Start Talk" na aba Talk
 
