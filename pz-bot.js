@@ -6866,6 +6866,37 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return getChatMessages().filter((message) => message.channelName === "Default");
   }
 
+  // Ruído do jogo que polui o contexto mandado pra IA. O Talk envia as
+  // últimas mensagens como histórico da conversa — se forem "You lose 47
+  // hitpoints" e listas de loot, a IA responde com base em lixo.
+  const padroesRuido = [
+    /\byou lose\b.*\bhitpoints?\b/i,
+    /\byou (?:heal|healed|gain|gained|advanced|deal)\b/i,
+    /\bloot of\b/i,
+    /\byou see\b/i,
+    /\bhitpoints? due to\b/i,
+    /\bis dead\b/i,
+    /\byou are (?:poisoned|burning|electrified|bleeding)\b/i,
+    /\bmana\b.*\brestored\b/i,
+    /\busing one of\b/i,
+    /^\s*\d+[\s.,]*$/,
+  ];
+
+  function pareceRuido(message) {
+    const corpo = String(message?.body || message?.rawMessage || "");
+    if (!corpo) return true;
+    // Sem remetente = mensagem de sistema
+    if (!message?.sender) return true;
+    return padroesRuido.some((re) => re.test(corpo));
+  }
+
+  // Contexto limpo: só conversa de gente de verdade
+  function getContextMessages(limite = 12) {
+    return getDefaultMessages()
+      .filter((m) => !pareceRuido(m))
+      .slice(-limite);
+  }
+
   function getNewestPendingMessage() {
     const pendingMessages = getDefaultMessages().filter((message) => {
       if (!message?.body || !message?.key) {
@@ -6877,6 +6908,12 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       }
 
       if (!message.sender || isSelfMessage(message) || isNpcMessage(message) || isTrustedSender(message) || isGameMasterSender(message)) {
+        rememberSeenMessage(message);
+        return false;
+      }
+
+      // Não responder a log de combate/sistema que caiu no Default
+      if (pareceRuido(message)) {
         rememberSeenMessage(message);
         return false;
       }
@@ -7193,7 +7230,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     state.pending = true;
 
     try {
-      const contextMessages = getDefaultMessages().slice(-12);
+      const contextMessages = getContextMessages(12); // sem ruído de combate/sistema
       if (!isSenderVisiblePlayer(pending.targetMessage)) {
         rememberSeenMessages(pending.pendingMessages);
         bot.log("talk skipped reply", {
@@ -7344,6 +7381,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     status,
     updateConfig,
     getChatMessages,
+    getContextMessages,
     maybeRespond,
     config,
   };
