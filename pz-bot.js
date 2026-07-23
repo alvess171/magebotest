@@ -123,6 +123,8 @@
   // arquivo, isso geraria "Cannot access before initialization".
   let panelEl, bodyEl, tabsEl, contentWrapEl;
   let dragLock = false; // trava recálculo de tamanho enquanto arrasta
+  let lastViewportWidth = window.innerWidth;
+  const PANEL_WIDTH = 260; // largura fixa — nunca "auto", senão estica pra caber as abas
 
   // ===== MÓDULO: RUNE MAKER =====
   const Rune = (() => {
@@ -8399,7 +8401,9 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       offsetY = clientY - rect.top;
       // Congela tamanho e posição atuais antes de trocar de right→left.
       // Sem isso o painel escorrega/estica ao largar a ancoragem original.
-      panelEl.style.width = rect.width + "px";
+      // NÃO usar rect.width aqui: se a largura estiver errada por algum
+      // motivo, pinar o rect congela o erro pra sempre. Largura é fixa.
+      panelEl.style.width = PANEL_WIDTH + "px";
       panelEl.style.maxHeight = rect.height + "px";
       panelEl.style.left = rect.left + "px";
       panelEl.style.top = rect.top + "px";
@@ -8428,7 +8432,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       if (!dragging) return;
       dragging = false;
       dragLock = false;
-      applyMaxHeight(); // volta ao limite normal (85% da tela, em px)
+      applyMaxHeight(true); // volta ao limite normal
     }
 
     // Mouse (desktop)
@@ -8458,7 +8462,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     minimized = !minimized;
     contentWrapEl.style.display = minimized ? "none" : "block";
     minimizeBtn.textContent = minimized ? "▢" : "—";
-    panelEl.style.width = minimized ? "auto" : "";
+    panelEl.style.width = PANEL_WIDTH + "px"; // nunca "auto"
   }
 
   function buildPanel() {
@@ -8466,7 +8470,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); z-index:999999;
       background:#1e1e1e; color:#eee; font-family:sans-serif; font-size:12px;
       border:1px solid #444; border-radius:8px; padding:0;
-      width:260px; max-width:92vw;
+      width:260px; min-width:260px; max-width:260px; box-sizing:border-box;
       box-shadow:0 4px 12px rgba(0,0,0,0.5); user-select:none;
       display:flex; flex-direction:column; touch-action:none;
     `);
@@ -8505,15 +8509,20 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     // max-height em PIXELS em vez de vh: no celular, quando a barra de
     // endereço do navegador recolhe durante o arrasto, o valor de 1vh
     // aumenta e o painel cresceria sozinho. Em px isso não acontece.
-    applyMaxHeight();
+    applyMaxHeight(true); // primeira aplicação: força
     window.addEventListener("resize", applyMaxHeight);
-    window.addEventListener("orientationchange", applyMaxHeight);
+    window.addEventListener("orientationchange", () => setTimeout(() => applyMaxHeight(true), 300));
 
     switchTab("heal");
   }
 
-  function applyMaxHeight() {
+  function applyMaxHeight(force) {
     if (!panelEl || dragLock) return;
+    // A barra de URL do celular recolhendo dispara "resize" e muda só a
+    // ALTURA. Se a gente reagir a isso, o painel cresce/encolhe sozinho.
+    // Rotação de tela muda a LARGURA — só aí vale recalcular.
+    if (!force && lastViewportWidth === window.innerWidth) return;
+    lastViewportWidth = window.innerWidth;
     panelEl.style.maxHeight = Math.round(window.innerHeight * 0.85) + "px";
   }
 
