@@ -51,6 +51,20 @@
       if (externalBot?.getPlayerState) return externalBot.getPlayerState();
       return window.gameClient?.player?.state || null;
     },
+    getCapacity() {
+      const s = bot.getPlayerState();
+      const direto = Number(s?.capacity ?? s?.cap ?? s?.freeCapacity ?? s?.maxCapacity);
+      if (Number.isFinite(direto) && direto > 0) return direto;
+      // Fallback: lê da UI de equipamento ("Cap: 606")
+      try {
+        const txt = document.querySelector("#cap, [data-cap], .capacity")?.textContent
+          || Array.from(document.querySelectorAll("div,span"))
+               .find((e) => e.children.length === 0 && /^\s*Cap[:\s]/i.test(e.textContent || ""))?.textContent;
+        const m = String(txt || "").match(/(\d[\d.,]*)/);
+        if (m) return Number(m[1].replace(/[.,]/g, ""));
+      } catch {}
+      return null;
+    },
     getPlayerSnapshot() {
       const s = bot.getPlayerState();
       if (!s) return null;
@@ -59,6 +73,7 @@
         maxHealth: Number(s.maxHealth ?? 0),
         mana: Number(s.mana ?? 0),
         maxMana: Number(s.maxMana ?? 0),
+        capacity: bot.getCapacity(),
       };
     },
     getPlayerPosition() {
@@ -6568,7 +6583,514 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     bot.storage.remove(talkStorageKey); // Remove entrada inválida
   }
   
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installAutoRingByCapModule = function installAutoRingByCapModule(bot) {
+
+  const configStorageKey = "minibiaBot.autoRingByCap.config";
+  const originStorageKey = "minibiaBot.autoRingByCap.origin";
+  const RING_SLOT = 8;
+
+  const config = Object.assign(
+    {
+      tickMs         : 1000,
+      equipCooldownMs: 1500,
+      capMin         : 200,
+      capPut         : 300,
+      enabled        : false,
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  const state = {
+    running     : false,
+    timerId     : null,
+    lastActionAt: 0,
+    ringOrigin  : bot.storage.get(originStorageKey, null),
+  };
+
+  function persistConfig() { bot.storage.set(configStorageKey, { ...config }); }
+  function persistOrigin()  { bot.storage.set(originStorageKey, state.ringOrigin); }
+
+  function getEquipment()      { return window.gameClient?.player?.equipment || null; }
+  function getOpenContainers() { return Array.from(window.gameClient?.player?.__openedContainers || []); }
+
+  function getItemDef(item) {
+    if (!item) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
+      window.gameClient?.itemDefinitionsBySid?.[item.sid]            ||
+      window.gameClient?.itemDefinitions?.[item.id]                  ||
+      null
+    );
+  }
+
+  function getItemName(item) {
+    return String(getItemDef(item)?.properties?.name || item?.name || "").toLowerCase();
+  }
+
+  function isRingItem(item) {
+    if (!item) return false;
+    const def  = getItemDef(item);
+    const slot = String(def?.properties?.slotType || def?.properties?.slot || "").toLowerCase();
+    if (slot === "ring") return true;
+    return /\bring\b/i.test(getItemName(item));
+  }
+
+  function getEquippedRing() {
+    return getEquipment()?.getSlotItem?.(RING_SLOT) || null;
+  }
+
+  function getCurrentCap() {
+    return bot.getPlayerSnapshot?.()?.capacity ?? null;
+  }
+
+  function findContainerById(id) {
+    if (id == null) return null;
+    return getOpenContainers().find(c => (c.__containerId ?? c.id) === id) || null;
+  }
+
+  function findRingInContainers() {
+    for (const c of getOpenContainers()) {
+      const slots = c?.slots || [];
+      for (let i = 0; i < slots.length; i++) {
+        const item = c.getSlotItem?.(i) || slots[i]?.item;
+        if (item?.id && isRingItem(item)) {
+          return { container: c, slotIndex: i, item, containerId: c.__containerId ?? c.id };
+        }
+      }
+    }
+    return null;
+  }
+
+  function findEmptySlot(preferContainerId = null) {
+    const containers = getOpenContainers();
+    const ordered = preferContainerId != null
+      ? [
+          ...containers.filter(c => (c.__containerId ?? c.id) === preferContainerId),
+          ...containers.filter(c => (c.__containerId ?? c.id) !== preferContainerId),
+        ]
+      : containers;
+
+    for (const c of ordered) {
+      const slots = c?.slots || [];
+      for (let i = 0; i < slots.length; i++) {
+        const item = c.getSlotItem?.(i) || slots[i]?.item;
+        if (!item?.id) return { container: c, slotIndex: i, containerId: c.__containerId ?? c.id };
+      }
+    }
+    return null;
+  }
+
+  function sendMove(from, to) {
+    try {
+      if (window.ItemMovePacket && typeof window.gameClient?.send === "function") {
+        window.gameClient.send(new ItemMovePacket(from, to, 1));
+        return true;
+      }
+      if (typeof window.gameClient?.mouse?.sendItemMove === "function") {
+        window.gameClient.mouse.sendItemMove(from, to, 1);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      bot.log("autoRingByCap sendMove error", e?.message || e);
+      return false;
+    }
+  }
+
+  function removeRing(now) {
+    const eq   = getEquipment();
+    const ring = getEquippedRing();
+    if (!eq || !ring) return false;
+
+    let destContainer = null;
+    let destSlot      = null;
+
+    // Tenta devolver ao slot original
+    if (state.ringOrigin) {
+      const c = findContainerById(state.ringOrigin.containerId);
+      if (c) {
+        const item = c.getSlotItem?.(state.ringOrigin.slotIndex) || c.slots?.[state.ringOrigin.slotIndex]?.item;
+        if (!item?.id) {
+          destContainer = c;
+          destSlot      = state.ringOrigin.slotIndex;
+        }
+      }
+    }
+
+    // Fallback: primeiro slot vazio disponível (preferindo mesmo container)
+    if (!destContainer) {
+      const empty = findEmptySlot(state.ringOrigin?.containerId);
+      if (!empty) { bot.log("autoRingByCap: sem slot vazio para devolver anel"); return false; }
+      destContainer = empty.container;
+      destSlot      = empty.slotIndex;
+    }
+
+    const ok = sendMove(
+      { which: eq,            index: RING_SLOT },
+      { which: destContainer, index: destSlot  }
+    );
+
+    if (ok) {
+      state.lastActionAt = now;
+      bot.log("autoRingByCap: anel removido (cap baixa)", {
+        cap    : getCurrentCap(),
+        capMin : config.capMin,
+        ring   : getItemName(ring),
+        destSlot,
+      });
+    }
+    return ok;
+  }
+
+  function equipRing(now) {
+    const eq = getEquipment();
+    if (!eq || getEquippedRing()) return false;
+
+    let src = null;
+
+    // Tenta origem salva primeiro
+    if (state.ringOrigin) {
+      const c = findContainerById(state.ringOrigin.containerId);
+      if (c) {
+        const item = c.getSlotItem?.(state.ringOrigin.slotIndex) || c.slots?.[state.ringOrigin.slotIndex]?.item;
+        if (item?.id && isRingItem(item)) {
+          src = { container: c, slotIndex: state.ringOrigin.slotIndex, item, containerId: state.ringOrigin.containerId };
+        }
+      }
+    }
+
+    // Fallback: busca em qualquer container aberto
+    if (!src) src = findRingInContainers();
+    if (!src) { bot.log("autoRingByCap: nenhum anel encontrado nos containers"); return false; }
+
+    // Salva a origem antes de mover
+    state.ringOrigin = { containerId: src.containerId, slotIndex: src.slotIndex };
+    persistOrigin();
+
+    const ok = sendMove(
+      { which: src.container, index: src.slotIndex },
+      { which: eq,            index: RING_SLOT      }
+    );
+
+    if (ok) {
+      state.lastActionAt = now;
+      bot.log("autoRingByCap: anel equipado (cap ok)", {
+        cap           : getCurrentCap(),
+        capPut        : config.capPut,
+        ring          : getItemName(src.item),
+        fromSlot      : src.slotIndex,
+        fromContainerId: src.containerId,
+      });
+    }
+    return ok;
+  }
+
+  function tryManageRing() {
+    if (!config.enabled) return false;
+    const now = Date.now();
+    if (now - state.lastActionAt < config.equipCooldownMs) return false;
+
+    const cap = getCurrentCap();
+    if (cap == null) return false;
+
+    if (cap < config.capMin &&  getEquippedRing()) return removeRing(now);
+    if (cap >= config.capPut && !getEquippedRing()) return equipRing(now);
+    return false;
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try {
+      tryManageRing();
+    } catch (e) {
+      bot.log("autoRingByCap tick error", e?.message || e);
+    } finally {
+      if (state.running) state.timerId = window.setTimeout(tick, config.tickMs);
+    }
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    persistConfig();
+    if (state.running) { bot.log("autoRingByCap already running"); return false; }
+    state.running = true;
+    bot.log("autoRingByCap started", { ...config });
+    tick();
+    return true;
+  }
+
+  function stop(opts = {}) {
+    state.running = false;
+    if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
+    if (opts.persistEnabled !== false) { config.enabled = false; persistConfig(); }
+    bot.log("autoRingByCap stopped");
+    return true;
+  }
+
+  function status() {
+    return {
+      running      : state.running,
+      config       : { ...config },
+      currentCap   : getCurrentCap(),
+      ringEquipped : !!getEquippedRing(),
+      ringOrigin   : state.ringOrigin ? { ...state.ringOrigin } : null,
+      lastActionAt : state.lastActionAt,
+    };
+  }
+
+  function updateConfig(next = {}) {
+    if ("capMin"          in next) next.capMin          = Math.max(0,   Number(next.capMin)          || 0);
+    if ("capPut"          in next) next.capPut          = Math.max(0,   Number(next.capPut)          || 0);
+    if ("equipCooldownMs" in next) next.equipCooldownMs = Math.max(500, Number(next.equipCooldownMs) || 1500);
+    if ("tickMs"          in next) next.tickMs          = Math.max(500, Number(next.tickMs)          || 1000);
+    Object.assign(config, next);
+    persistConfig();
+    bot.log("autoRingByCap config updated", { ...config });
+    return { ...config };
+  }
+
+  function clearOrigin() {
+    state.ringOrigin = null;
+    bot.storage.remove(originStorageKey);
+    bot.log("autoRingByCap: origem do anel limpa");
+  }
+
+  // auto-start fica a cargo do boot escalonado
+
+  bot.autoRingByCap = { start, stop, status, updateConfig, clearOrigin, tryManageRing, config };
+};
+
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
+window.__minibiaBotBundle.installautostackModule = function installautostackModule(bot) {
+
+  const configStorageKey = "minibiaBot.autostack.config";
+
+  const config = Object.assign(
+    {
+      tickMs   : 2000,
+      maxStack : 100,
+      targetBagIndex: 1, // 0 = primeira bag, 1 = segunda, etc.
+      enabled  : false,
+    },
+    bot.storage.get(configStorageKey, {})
+  );
+
+  const state = {
+    running  : false,
+    timerId  : null,
+    merged   : 0,
+  };
+
+  function persistConfig() { bot.storage.set(configStorageKey, { ...config }); }
+
+  function getOpenContainers() {
+    return Array.from(window.gameClient?.player?.__openedContainers || []);
+  }
+
+  function getTargetContainer() {
+    const containers = getOpenContainers();
+    const index = Math.max(0, Math.trunc(Number(config.targetBagIndex) || 0));
+    return containers[index] || null;
+  }
+
+  function getItemDef(item) {
+    if (!item) return null;
+    return (
+      window.gameClient?.itemDefinitionsByCid?.[item.cid ?? item.id] ||
+      window.gameClient?.itemDefinitionsBySid?.[item.sid]            ||
+      window.gameClient?.itemDefinitions?.[item.id]                  ||
+      null
+    );
+  }
+
+  function getItemName(item) {
+    return String(getItemDef(item)?.properties?.name || item?.name || "").toLowerCase();
+  }
+
+  function isRune(item) {
+    if (!item) return false;
+    const def = getItemDef(item);
+    if (def?.properties?.isRune || def?.properties?.rune) return true;
+    return /\brune\b/i.test(getItemName(item));
+  }
+
+  function getRuneSlots() {
+    const result = [];
+    getOpenContainers().forEach((container, containerIndex) => {
+      const slots = container?.slots || [];
+      for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
+        const item = container.getSlotItem?.(slotIndex) || slots[slotIndex]?.item;
+        if (!item?.id || !isRune(item)) continue;
+        result.push({ container, containerIndex, slotIndex, item });
+      }
+    });
+    return result;
+  }
+
+  function moveItem(from, to, count) {
+    try {
+      window.gameClient.mouse.sendItemMove(
+        { which: from.container, index: from.slotIndex },
+        { which: to.container,   index: to.slotIndex   },
+        count
+      );
+      return true;
+    } catch (e) {
+      bot.log("autostack sendItemMove error", e?.message || e);
+      return false;
+    }
+  }
+
+  function findEmptySlotInContainer(container) {
+    const slots = container?.slots || [];
+    for (let i = 0; i < slots.length; i++) {
+      const item = container.getSlotItem?.(i) || slots[i]?.item;
+      if (!item?.id) return i;
+    }
+    return -1;
+  }
+
+  function runStack() {
+    const first = getTargetContainer();
+    if (!first) return 0;
+
+    const runeSlots = getRuneSlots();
+    if (!runeSlots.length) return 0;
+
+    // Agrupa por id (cid/sid/id)
+    const byId = new Map();
+    for (const entry of runeSlots) {
+      const id = entry.item.cid ?? entry.item.sid ?? entry.item.id;
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(entry);
+    }
+
+    let merges = 0;
+
+    for (const [id, group] of byId) {
+      if (group.length < 2) continue;
+
+      // Doadores: slots fora da primeira bag
+      const donors = group.filter(e => e.container !== first);
+      if (!donors.length) continue;
+
+      for (const donor of donors) {
+        if (!donor.item.count || donor.item.count <= 0) continue;
+
+        // Tenta empilhar em slot existente na primeira bag (mesmo id)
+        const firstBagSlots = group
+          .filter(e => e.container === first)
+          .sort((a, b) => b.item.count - a.item.count);
+
+        for (const recv of firstBagSlots) {
+          const space = config.maxStack - (recv.item.count || 0);
+          if (space <= 0) continue;
+          const toMove = Math.min(donor.item.count, space);
+          if (moveItem(donor, recv, toMove)) {
+            donor.item.count -= toMove;
+            recv.item.count  += toMove;
+            merges++;
+            bot.log("autostack rune merged", {
+              id,
+              name   : getItemName(donor.item),
+              count  : toMove,
+              fromSlot: donor.slotIndex,
+              toSlot  : recv.slotIndex,
+            });
+          }
+          if (donor.item.count <= 0) break;
+        }
+
+        // Se ainda sobrou, move para slot vazio na primeira bag
+        if (donor.item.count > 0) {
+          const emptySlot = findEmptySlotInContainer(first);
+          if (emptySlot >= 0) {
+            const fakeRecv = { container: first, slotIndex: emptySlot, item: { count: 0 } };
+            const toMove = Math.min(donor.item.count, config.maxStack);
+            if (moveItem(donor, fakeRecv, toMove)) {
+              donor.item.count -= toMove;
+              merges++;
+              bot.log("autostack rune → slot vazio", { id, toMove, emptySlot });
+            }
+          }
+        }
+      }
+    }
+
+    return merges;
+  }
+
+  function tick() {
+    if (!state.running) return;
+    try {
+      if (config.enabled) {
+        const merged = runStack();
+        if (merged > 0) {
+          state.merged += merged;
+          bot.log("autostack completed", { merged, total: state.merged });
+        }
+      }
+    } catch (e) {
+      bot.log("autostack tick error", e?.message || e);
+    } finally {
+      state.timerId = window.setTimeout(tick, config.tickMs);
+    }
+  }
+
+  function start(overrides = {}) {
+    Object.assign(config, overrides, { enabled: true });
+    persistConfig();
+    if (state.running) { bot.log("autostack already running"); return false; }
+    state.running = true;
+    state.merged  = 0;
+    bot.log("autostack started (runas apenas → primeira bag)", { ...config });
+    tick();
+    return true;
+  }
+
+  function stop(opts = {}) {
+    state.running = false;
+    if (state.timerId != null) { window.clearTimeout(state.timerId); state.timerId = null; }
+    if (opts.persistEnabled !== false) { config.enabled = false; persistConfig(); }
+    bot.log("autostack stopped", { totalMerged: state.merged });
+    return true;
+  }
+
+  function runOnce() {
+    const merged = runStack();
+    bot.log("autostack runOnce", { merged });
+    return merged;
+  }
+
+  function status() {
+    return {
+      running : state.running,
+      config  : { ...config },
+      merged  : state.merged,
+    };
+  }
+
+  function updateConfig(next = {}) {
+    if ("tickMs"   in next) next.tickMs   = Math.max(500, Number(next.tickMs)   || 2000);
+    if ("maxStack" in next) next.maxStack = Math.max(2,   Number(next.maxStack) || 100);
+    if ("targetBagIndex" in next) next.targetBagIndex = Math.max(0, Math.trunc(Number(next.targetBagIndex) || 0));
+    Object.assign(config, next);
+    persistConfig();
+    bot.log("autostack config updated", { ...config });
+    return { ...config };
+  }
+
+  // auto-start fica a cargo do boot escalonado
+
+  bot.autostack = { start, stop, runOnce, status, updateConfig, config };
+};
+
   window.__minibiaBotBundle.installTalkModule(bot);
+  window.__minibiaBotBundle.installAutoRingByCapModule(bot);
+  window.__minibiaBotBundle.installautostackModule(bot);
 
   // Aliases pra o panic.js conseguir integrar com os módulos já existentes no painel
   bot.rune = Rune;
@@ -6587,6 +7109,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     { id: "cave", label: "Cave" },
     { id: "rune", label: "Rune" },
     { id: "ring", label: "Ring" },
+    { id: "ringcap", label: "RingCap" },
+    { id: "stack", label: "Stack" },
     { id: "haste", label: "Haste" },
     { id: "eat", label: "Eat" },
     { id: "monk", label: "Monk" },
@@ -7698,6 +8222,147 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return wrap;
   }
 
+  // ===== ABA: RING CAP (equipa/remove anel conforme a capacidade) =====
+  function buildRingCapTab() {
+    const wrap = el("div");
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:8px;", "Tira o anel quando a cap fica baixa (pra não travar loot) e devolve quando sobra cap — no mesmo slot de onde saiu."));
+
+    const statusEl = el("div", "margin-bottom:8px; font-size:11px;");
+    statusEl.dataset.ringcapStatus = "1";
+    wrap.appendChild(statusEl);
+
+    wrap.appendChild(makeField("Remover anel se cap <", bot.autoRingByCap.config.capMin, (v) => {
+      bot.autoRingByCap.updateConfig({ capMin: Number(v) || 0 });
+    }, "number"));
+
+    wrap.appendChild(makeField("Equipar anel se cap >=", bot.autoRingByCap.config.capPut, (v) => {
+      bot.autoRingByCap.updateConfig({ capPut: Number(v) || 0 });
+    }, "number"));
+
+    wrap.appendChild(makeField("Cooldown entre ações (ms)", bot.autoRingByCap.config.equipCooldownMs, (v) => {
+      bot.autoRingByCap.updateConfig({ equipCooldownMs: Number(v) || 1500 });
+    }, "number"));
+
+    const clearBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#555; color:#fff; cursor:pointer; font-size:11px;", "Esquecer slot de origem do anel");
+    clearBtn.onclick = () => { bot.autoRingByCap.clearOrigin(); updatePanel(); };
+    wrap.appendChild(clearBtn);
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      const running = bot.autoRingByCap.status().running;
+      toggleBtn.textContent = running ? "Stop Ring Cap" : "Start Ring Cap";
+      toggleBtn.style.background = running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      bot.autoRingByCap.status().running ? bot.autoRingByCap.stop() : bot.autoRingByCap.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
+  // ===== ABA: STACK (junta runas soltas numa bag escolhida) =====
+  function buildStackTab() {
+    const wrap = el("div");
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:8px;", "Junta as runas espalhadas pelas bags abertas dentro de uma bag só, empilhando o que der."));
+
+    const statusEl = el("div", "margin-bottom:8px; font-size:11px;");
+    statusEl.dataset.stackStatus = "1";
+    wrap.appendChild(statusEl);
+
+    // ── Seletor de bag de destino ──
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Bag de destino (pra onde as runas vão):"));
+
+    const bagSelect = el("select", "width:100%; padding:4px; margin-bottom:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee; box-sizing:border-box;");
+
+    function getOpenContainers() {
+      return Array.from(window.gameClient?.player?.__openedContainers || []);
+    }
+
+    function containerLabel(container, index) {
+      const nome =
+        container?.name ||
+        window.gameClient?.itemDefinitionsByCid?.[container?.cid ?? container?.id]?.properties?.name ||
+        "";
+      return "Bag " + (index + 1) + (nome ? " — " + nome : "");
+    }
+
+    function refreshBagSelect() {
+      const atual = Number(bot.autostack.config.targetBagIndex) || 0;
+      bagSelect.innerHTML = "";
+      const containers = getOpenContainers();
+
+      if (!containers.length) {
+        const o = el("option", null, "(nenhuma bag aberta)");
+        o.value = String(atual);
+        bagSelect.appendChild(o);
+        return;
+      }
+
+      containers.forEach((c, i) => {
+        const o = el("option", null, containerLabel(c, i));
+        o.value = String(i);
+        if (i === atual) o.selected = true;
+        bagSelect.appendChild(o);
+      });
+
+      // Se a bag salva não existe mais, mostra assim mesmo pra não perder a config
+      if (atual >= containers.length) {
+        const o = el("option", null, "Bag " + (atual + 1) + " (fechada)");
+        o.value = String(atual);
+        o.selected = true;
+        bagSelect.appendChild(o);
+      }
+    }
+
+    bagSelect.onchange = () => {
+      bot.autostack.updateConfig({ targetBagIndex: Number(bagSelect.value) || 0 });
+    };
+    refreshBagSelect();
+    wrap.appendChild(bagSelect);
+
+    const refreshBagBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "↻ Atualizar lista de bags");
+    refreshBagBtn.onclick = () => { refreshBagSelect(); };
+    wrap.appendChild(refreshBagBtn);
+
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "A ordem é a mesma em que as bags aparecem abertas no jogo. Se abrir/fechar bags, clique em atualizar."));
+
+    wrap.appendChild(makeField("Máximo por pilha", bot.autostack.config.maxStack, (v) => {
+      bot.autostack.updateConfig({ maxStack: Number(v) || 100 });
+    }, "number"));
+
+    wrap.appendChild(makeField("Intervalo (ms)", bot.autostack.config.tickMs, (v) => {
+      bot.autostack.updateConfig({ tickMs: Number(v) || 2000 });
+    }, "number"));
+
+    const onceBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#2c4fc7; color:#fff; cursor:pointer; font-size:11px;", "Organizar agora (uma vez)");
+    onceBtn.onclick = () => { bot.autostack.runOnce(); updatePanel(); };
+    wrap.appendChild(onceBtn);
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      const running = bot.autostack.status().running;
+      toggleBtn.textContent = running ? "Stop Stack" : "Start Stack";
+      toggleBtn.style.background = running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      bot.autostack.status().running ? bot.autostack.stop() : bot.autostack.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
   // ===== ABA: MISC (funções diversas — zoom blocker, e mais quando você mandar) =====
   function buildMiscTab() {
     const wrap = el("div");
@@ -7789,6 +8454,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     attack: buildAttackTab, uhplayer: buildUhPlayerTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
     pz: buildPzTab, talk: buildTalkTab, chat: buildChatTab, fire: buildFireTab,
     tela: buildTelaTab, misc: buildMiscTab,
+    ringcap: buildRingCapTab, stack: buildStackTab,
   };
 
   function renderBody() {
@@ -7947,6 +8613,33 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       const s = bot.Chatdetector.status();
       chatStatusEl.textContent = s.running ? "● Monitorando chat (" + (s.playerName || "?") + ")" : "○ Parado";
       chatStatusEl.style.color = s.running ? "#5c5" : "#999";
+    }
+
+    // ── Ring Cap ──
+    const ringcapStatusEl = bodyEl.querySelector("[data-ringcap-status]");
+    if (ringcapStatusEl && bot.autoRingByCap) {
+      const s = bot.autoRingByCap.status();
+      const cap = s.currentCap;
+      if (cap == null) {
+        ringcapStatusEl.textContent = "⚠ Não consegui ler a capacidade";
+        ringcapStatusEl.style.color = "#e77";
+      } else {
+        ringcapStatusEl.textContent =
+          (s.running ? "● Rodando" : "○ Parado") +
+          " — cap: " + cap + " | anel: " + (s.ringEquipped ? "equipado" : "guardado");
+        ringcapStatusEl.style.color = s.running ? "#5c5" : "#999";
+      }
+    }
+
+    // ── Stack ──
+    const stackStatusEl = bodyEl.querySelector("[data-stack-status]");
+    if (stackStatusEl && bot.autostack) {
+      const s = bot.autostack.status();
+      stackStatusEl.textContent =
+        (s.running ? "● Rodando" : "○ Parado") +
+        " — bag " + ((Number(s.config.targetBagIndex) || 0) + 1) +
+        " | juntadas: " + s.merged;
+      stackStatusEl.style.color = s.running ? "#5c5" : "#999";
     }
 
     // ── Tela (fullscreen) ──
@@ -8163,6 +8856,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       ["Follow", Follow], ["FriendHeal", FriendHeal], ["LastTarget", LastTarget],
       ["Attack", bot.attack], ["Cave", bot.cave], ["Drop", bot.drop],
       ["UhPlayer", bot.uhPlayer], ["ChatDetector", bot.Chatdetector],
+      ["RingCap", bot.autoRingByCap], ["AutoStack", bot.autostack],
       ["PerformanceMode", PerformanceMode], ["HideSpellAnimations", HideSpellAnimations],
       ["ZoomBlocker", ZoomBlocker], ["SwipeNavBlocker", SwipeNavBlocker],
       // Talk fica de fora de propósito — só liga pelo botão
@@ -8248,12 +8942,13 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
+    RingCap: bot.autoRingByCap, AutoStack: bot.autostack,
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
     ZoomBlocker, SwipeNavBlocker, PerformanceMode, HideSpellAnimations, Fullscreen,
     diagnose, repair,
   };
   
-  log("carregado. Painel com 24 abas criado no canto da tela.");
+  log("carregado. Painel com 27 abas criado no canto da tela.");
   
   // ✅ Expõe bot GLOBALMENTE para usar no console
   window.bot = bot;
