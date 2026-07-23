@@ -6121,26 +6121,76 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
   function tocarAlarme() {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioCtx();
+      if (!AudioCtx) return;
 
-      for (let i = 0; i < config.qtdBips; i++) {
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.__allInOneBypass = true; // alarme do bot nunca é silenciado
-        oscillator.connect(gain);
-        gain.connect(ctx.destination);
+      // Reaproveita o MESMO contexto do resto do bot. Criar um novo a cada
+      // alarme fazia o som falhar no celular: sem gesto do usuário o
+      // contexto nasce "suspended" e não emite nada.
+      if (!bot.__alarmCtx) bot.__alarmCtx = new AudioCtx();
+      const ctx = bot.__alarmCtx;
 
-        oscillator.type = "square";
-        oscillator.frequency.value = config.tomHz;
-        gain.gain.value = config.volume;
+      const bipar = () => {
+        for (let i = 0; i < config.qtdBips; i++) {
+          const oscillator = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.__allInOneBypass = true; // alarme do bot nunca é silenciado
+          oscillator.connect(gain);
+          gain.connect(ctx.destination);
 
-        const inicio = ctx.currentTime + i * 0.3;
-        oscillator.start(inicio);
-        oscillator.stop(inicio + 0.2);
+          oscillator.type = "square";
+          oscillator.frequency.value = config.tomHz;
+          gain.gain.value = config.volume;
+
+          const inicio = ctx.currentTime + i * 0.3;
+          oscillator.start(inicio);
+          oscillator.stop(inicio + 0.2);
+        }
+      };
+
+      if (ctx.state === "suspended") {
+        ctx.resume().then(bipar).catch(() => {
+          bot.log("chatDetector: áudio bloqueado — toque na tela uma vez pra liberar");
+          bot.armAlarmUnlock?.();
+        });
+      } else {
+        bipar();
       }
     } catch (erro) {
       bot.log("chatDetector alarm error: " + erro?.message);
     }
+  }
+
+  // Testa um texto contra as regras SEM precisar esperar alguém falar.
+  // Diz exatamente qual condição bateu (ou o que barrou).
+  function testarTexto(texto, remetenteFake = "Fulano") {
+    const mensagem = String(texto || "");
+    const termos = config.termosVigiados || [];
+    const bateuVigiado = termos.some((t) => mensagem.toLowerCase().includes(String(t).toLowerCase()));
+    const ignorado = deveIgnorar(mensagem, remetenteFake);
+    const mencionado = !!(state.playerName && mensagem.toLowerCase().includes(state.playerName.toLowerCase()));
+
+    const motivos = [];
+    if (config.alarmarQualquer) motivos.push("qualquer mensagem");
+    if (config.alarmarMencao && mencionado) motivos.push("menção ao seu nome");
+    if (config.alarmarVigiados && bateuVigiado) motivos.push("termo vigiado");
+
+    const bloqueadoPorIgnorado = !bateuVigiado && ignorado;
+    const vaiAlarmar = !bloqueadoPorIgnorado && motivos.length > 0;
+
+    const resultado = {
+      texto: mensagem,
+      rodando: state.running,
+      termosCadastrados: termos.length,
+      bateuTermoVigiado: bateuVigiado,
+      alarmeVigiadosLigado: !!config.alarmarVigiados,
+      bloqueadoPorListaDeIgnorados: bloqueadoPorIgnorado,
+      vaiAlarmar,
+      motivos,
+    };
+
+    if (vaiAlarmar) tocarAlarme();
+    console.table ? console.table([resultado]) : console.log(resultado);
+    return resultado;
   }
 
   function deveIgnorar(mensagem, remetente) {
@@ -6354,6 +6404,8 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     stop,
     status,
     updateConfig,
+    testarTexto,
+    tocarAlarme,
     addIgnored,
     removeIgnored,
     addWatched,
@@ -6389,6 +6441,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     mudoPorGm: false,
     erros429: 0,
     backoffAte: 0,
+    ultimoMotivo429: null,
   };
   const greetingReplies = ["yo", "sup", "hey", "hiya", "yo lol"];
   const agreeReplies = ["true", "fr", "based", "ya", "real"];
@@ -6404,6 +6457,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     pollMs: minPollMs,
     replyCooldownMs: 1500,
     responderTodos: true,   // true = responde qualquer um, inclusive GM
+    usarClassificadorIA: false, // false = classifica local e gasta METADE da cota
     systemPrompt: defaultSystemPrompt,
     greetingPrompt: defaultGreetingPrompt,
     questionPrompt: defaultQuestionPrompt,
@@ -6784,13 +6838,27 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     if (!response.ok) {
       const errorText = await response.text();
 
-      // 429 = limite da API estourado. Backoff progressivo pra parar de
-      // martelar o endpoint (o log enchia de "Failed to load resource 429").
       if (response.status === 429 || response.status === 503) {
         state.erros429 = (state.erros429 || 0) + 1;
-        const espera = Math.min(600000, 30000 * Math.pow(2, state.erros429 - 1)); // 30s, 1m, 2m... até 10m
+
+        // A própria API diz quanto esperar e qual cota estourou.
+        let espera = Math.min(600000, 30000 * Math.pow(2, state.erros429 - 1));
+        let motivo = "limite temporário";
+
+        const cotaDiaria = /PerDay|per_day|PerDayPerProject/i.test(errorText);
+        const retry = errorText.match(/"retryDelay"\s*:\s*"(\d+)s"/);
+
+        if (cotaDiaria) {
+          // Cota do DIA estourada: não adianta tentar de novo em segundos.
+          espera = 60 * 60 * 1000; // 1 hora
+          motivo = "cota DIÁRIA esgotada";
+        } else if (retry) {
+          espera = Math.max(espera, (Number(retry[1]) + 5) * 1000);
+        }
+
         state.backoffAte = Date.now() + espera;
-        bot.log("talk: limite da API (" + response.status + ") — pausando " +
+        state.ultimoMotivo429 = motivo;
+        bot.log("talk: " + motivo + " (" + response.status + ") — pausando " +
                 Math.round(espera / 1000) + "s");
       }
 
@@ -6799,6 +6867,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
 
     state.erros429 = 0;
     state.backoffAte = 0;
+    state.ultimoMotivo429 = null;
 
     const data = await response.json();
     return (
@@ -6810,6 +6879,14 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   }
 
   async function classifyMessageType(targetMessage, contextMessages) {
+    // Sem classificador por API: economiza METADE da cota. A heurística
+    // local acerta bem em chat curto de jogo.
+    if (!config.usarClassificadorIA) {
+      if (isGreeting(targetMessage?.body)) return "greeting";
+      if (/\?/.test(String(targetMessage?.body || ""))) return "question";
+      return "statement";
+    }
+
     const rawType = normalizeText(
       await generateText(buildClassifierPrompt(targetMessage, contextMessages), {
         temperature: 0.1,
@@ -7079,6 +7156,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       lastReplyAt: state.lastReplyAt,
       mudoPorGm: state.mudoPorGm,
       backoffAte: state.backoffAte || 0,
+      motivo429: state.ultimoMotivo429 || null,
       config: {
         ...config,
         apiKey: config.apiKey ? "***configured***" : "",
@@ -8654,6 +8732,27 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     }
     renderIgnoredList();
 
+    const testRow = el("div", "display:flex; gap:4px; margin-bottom:8px;");
+    const testInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+    testInput.placeholder = "texto pra testar";
+    const testBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#2c4fc7; color:#fff; cursor:pointer; font-size:11px;", "Testar");
+    testBtn.onclick = () => {
+      const r = bot.Chatdetector.testarTexto(testInput.value || "");
+      alert(
+        "Termos cadastrados: " + r.termosCadastrados + "\n" +
+        "Bateu termo vigiado: " + (r.bateuTermoVigiado ? "SIM" : "não") + "\n" +
+        "Alarme de vigiados ligado: " + (r.alarmeVigiadosLigado ? "SIM" : "NÃO") + "\n" +
+        "Bloqueado por ignorados: " + (r.bloqueadoPorListaDeIgnorados ? "SIM" : "não") + "\n" +
+        "Detector rodando: " + (r.rodando ? "SIM" : "NÃO") + "\n\n" +
+        (r.vaiAlarmar ? "✅ VAI ALARMAR (" + r.motivos.join(", ") + ")" : "❌ NÃO alarma")
+      );
+    };
+    testInput.onkeydown = (e) => { if (e.key === "Enter") testBtn.click(); };
+    testRow.appendChild(testInput);
+    testRow.appendChild(testBtn);
+    wrap.appendChild(testRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Simula uma mensagem e mostra exatamente qual regra bateu (e toca o som, se for alarmar)."));
+
     const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
     function refreshToggle() {
       const running = bot.Chatdetector.status().running;
@@ -8718,6 +8817,8 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
 
     wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:6px;", "Obtenha sua chave em: https://ai.google.dev"));
 
+    wrap.appendChild(el("div", "color:#e9a; font-size:10px; line-height:1.5; background:#111; border-radius:4px; padding:6px; margin-bottom:8px;", "⚠ Plano grátis tem cota DIÁRIA por modelo (o gemini-flash-latest chegou a dar só 20/dia). Modelos mais antigos costumam ter cota bem maior — se estourar, troque o modelo abaixo."));
+
     wrap.appendChild(makeField("Modelo", bot.talk.config.model || "gemini-flash-latest", (v) => { 
       bot.talk.updateConfig({ model: v.trim() }); 
     }));
@@ -8738,6 +8839,16 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     todosRow.appendChild(todosCheckbox);
     todosRow.appendChild(document.createTextNode("Responder a todos, sem exceção"));
     wrap.appendChild(todosRow);
+
+    const classRow = el("label", "display:flex; align-items:center; gap:6px; margin:6px 0 4px; cursor:pointer; color:#ccc; font-size:11px;");
+    const classCheckbox = el("input");
+    classCheckbox.type = "checkbox";
+    classCheckbox.checked = !!bot.talk.config.usarClassificadorIA;
+    classCheckbox.onchange = () => bot.talk.updateConfig({ usarClassificadorIA: classCheckbox.checked });
+    classRow.appendChild(classCheckbox);
+    classRow.appendChild(document.createTextNode("Classificar mensagem com IA (gasta 2x a cota)"));
+    wrap.appendChild(classRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Desmarcado (recomendado): classifica localmente e usa 1 requisição por resposta em vez de 2."));
     wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Desmarcado, ele fica calado com Game Master na tela e não responde nomes da lista de GM."));
 
     wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-top:8px; margin-bottom:4px;", "📝 Prompts Customizáveis:"));
@@ -9312,8 +9423,9 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         talkStatusEl.textContent = "🚨 GM na tela — CALADO";
         talkStatusEl.style.color = "#f55";
       } else if (emBackoff) {
-        talkStatusEl.textContent = "⏳ Limite da API — volta em " +
-          Math.ceil((s.backoffAte - Date.now()) / 1000) + "s";
+        const seg = Math.ceil((s.backoffAte - Date.now()) / 1000);
+        const tempo = seg > 90 ? Math.ceil(seg / 60) + "min" : seg + "s";
+        talkStatusEl.textContent = "⏳ " + (s.motivo429 || "limite da API") + " — volta em " + tempo;
         talkStatusEl.style.color = "#fc5";
       } else {
         talkStatusEl.textContent = !apiKey
