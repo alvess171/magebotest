@@ -8225,7 +8225,20 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     renderBody();
   }
 
+  // Blindagem: quase todos os módulos chamam updatePanel() no tick, e a
+  // chamada fica FORA do try/catch deles — logo antes do setTimeout que
+  // mantém o loop vivo. Se updatePanel lançar uma única vez, o módulo
+  // morre em silêncio (e o botão continua mostrando "Stop"). Por isso
+  // aqui nada pode escapar.
   function updatePanel() {
+    try {
+      updatePanelInner();
+    } catch (error) {
+      console.error("[allInOne] updatePanel falhou (loops preservados):", error);
+    }
+  }
+
+  function updatePanelInner() {
     if (!panelEl) return;
     bodyEl.querySelectorAll("button[data-refreshable]").forEach((btn) => btn._refresh?.());
     const monkCountEl = bodyEl.querySelector("[data-monk-count]");
@@ -8637,6 +8650,30 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     }, 3000);
   }
 
+  // Diagnóstico: mostra quem está marcado como ligado x quem está de fato
+  // rodando. Útil quando um módulo "some" sem avisar.
+  function diagnose() {
+    const linhas = getBootJobs().map(([name, mod]) => ({
+      modulo: name,
+      ligado: mod ? modIsEnabled(mod) : "—",
+      rodando: mod ? modIsRunning(mod) : "—",
+      problema: mod && modIsEnabled(mod) && !modIsRunning(mod) ? "⚠ deveria estar rodando" : "",
+    }));
+    try { console.table(linhas); } catch { console.log(linhas); }
+    return linhas;
+  }
+
+  // Religa qualquer módulo marcado como ligado que não esteja rodando
+  function repair() {
+    const pendentes = getBootJobs().filter(([, mod]) => mod && modIsEnabled(mod) && !modIsRunning(mod));
+    pendentes.forEach(([name, mod]) => {
+      try { mod.start(); log("repair: " + name + " religado"); }
+      catch (e) { log("repair: falha em " + name, e?.message || e); }
+    });
+    updatePanel();
+    return pendentes.map(([n]) => n);
+  }
+
   whenGameReady(() => {
     log("boot: gameClient pronto, iniciando módulos...");
     bootModules(() => bootRetry());
@@ -8651,6 +8688,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
     ZoomBlocker, SwipeNavBlocker, PerformanceMode, HideSpellAnimations, Fullscreen, Background, GameAudio,
+    diagnose, repair,
   };
   
   log("carregado. Painel com 25 abas criado no canto da tela.");
