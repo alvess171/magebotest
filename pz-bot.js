@@ -6208,6 +6208,7 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     timerId: null,
     playerName: null,
     ultimaContagemPorCanal: new Map(),
+    canaisVistos: new Set(),
   };
 
   function tocarAlarme() {
@@ -6375,20 +6376,32 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     channelManager.channels.forEach((channel, indice) => {
       const nomeCanal = channel.name || ("Canal " + indice);
 
+      // Guarda todos os nomes vistos, pra listar na aba mesmo os não monitorados
+      state.canaisVistos.add(nomeCanal);
+
       if (config.canaisPermitidos.length > 0 && !config.canaisPermitidos.includes(nomeCanal)) {
         return;
       }
 
       const contents = channel.__contents || [];
-      const contagemAnterior = state.ultimaContagemPorCanal.get(indice) || 0;
+
+      // Indexado pelo NOME, não pelo índice do array: abrir ou fechar um
+      // canal remexe os índices e a contagem se perdia — daí mensagens
+      // sumirem sem aparecer no console nem alarmar.
+      const jaConhecido = state.ultimaContagemPorCanal.has(nomeCanal);
+      const contagemAnterior = state.ultimaContagemPorCanal.get(nomeCanal) || 0;
+
+      // Canal que apareceu agora: marca o histórico como visto em vez de
+      // disparar alarme pra tudo que já estava lá dentro.
+      const tratarComoHistorico = ehVerificacaoInicial || !jaConhecido;
 
       if (contents.length > contagemAnterior) {
         for (let i = contagemAnterior; i < contents.length; i++) {
-          processarMensagem(contents[i], nomeCanal, ehVerificacaoInicial);
+          processarMensagem(contents[i], nomeCanal, tratarComoHistorico);
         }
       }
 
-      state.ultimaContagemPorCanal.set(indice, contents.length);
+      state.ultimaContagemPorCanal.set(nomeCanal, contents.length);
     });
   }
 
@@ -6465,6 +6478,38 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     return true;
   }
 
+  function listarCanais() {
+    const cm = window.gameClient?.interface?.channelManager;
+    const atuais = (cm?.channels || []).map((c, i) => c?.name || ("Canal " + i));
+    atuais.forEach((n) => state.canaisVistos.add(n));
+    return {
+      abertos: atuais,
+      jaVistos: Array.from(state.canaisVistos),
+      monitorados: [...(config.canaisPermitidos || [])],
+    };
+  }
+
+  function addCanal(nome) {
+    const n = String(nome || "").trim();
+    if (!n) return false;
+    if ((config.canaisPermitidos || []).some((x) => x.toLowerCase() === n.toLowerCase())) return false;
+    config.canaisPermitidos = [...(config.canaisPermitidos || []), n];
+    persistConfig();
+    return true;
+  }
+
+  function removeCanal(nome) {
+    config.canaisPermitidos = (config.canaisPermitidos || []).filter((x) => x !== nome);
+    persistConfig();
+    return true;
+  }
+
+  function monitorarTodos() {
+    config.canaisPermitidos = []; // lista vazia = todos os canais
+    persistConfig();
+    return true;
+  }
+
   function addWatched(termo) {
     const t = (termo || "").trim();
     if (!t) return false;
@@ -6501,6 +6546,10 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     updateConfig,
     testarTexto,
     tocarAlarme,
+    listarCanais,
+    addCanal,
+    removeCanal,
+    monitorarTodos,
     addIgnored,
     removeIgnored,
     addWatched,
@@ -8794,6 +8843,59 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     watchedRow.appendChild(watchedCheckbox);
     watchedRow.appendChild(document.createTextNode("Alarme em termos vigiados"));
     wrap.appendChild(watchedRow);
+
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Canais monitorados:"));
+    const canaisListEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
+    wrap.appendChild(canaisListEl);
+
+    function renderCanais() {
+      canaisListEl.innerHTML = "";
+      const cfg = bot.Chatdetector.status().config;
+      const lista = cfg.canaisPermitidos || [];
+      if (!lista.length) {
+        canaisListEl.appendChild(el("div", "color:#5c5; font-size:11px;", "TODOS os canais (nenhum filtro)"));
+        return;
+      }
+      lista.forEach((nome) => {
+        const row = el("div", "display:flex; justify-content:space-between; align-items:center; padding:2px 0; font-size:11px;");
+        row.appendChild(el("span", null, nome));
+        const rm = el("span", "color:#e77; cursor:pointer; padding:0 4px;", "✕");
+        rm.onclick = () => { bot.Chatdetector.removeCanal(nome); renderCanais(); };
+        row.appendChild(rm);
+        canaisListEl.appendChild(row);
+      });
+    }
+    renderCanais();
+
+    const canalRow = el("div", "display:flex; gap:4px; margin-bottom:6px;");
+    const canalInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+    canalInput.placeholder = "nome do canal";
+    const addCanalBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#2d7a2d; color:#fff; cursor:pointer;", "+");
+    addCanalBtn.onclick = () => {
+      if (bot.Chatdetector.addCanal(canalInput.value)) { canalInput.value = ""; renderCanais(); }
+    };
+    canalInput.onkeydown = (e) => { if (e.key === "Enter") addCanalBtn.click(); };
+    canalRow.appendChild(canalInput);
+    canalRow.appendChild(addCanalBtn);
+    wrap.appendChild(canalRow);
+
+    const canaisBtnRow = el("div", "display:flex; gap:4px; margin-bottom:8px;");
+    const verCanaisBtn = el("button", "flex:1; padding:5px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "👁 Ver canais abertos");
+    verCanaisBtn.onclick = () => {
+      const c = bot.Chatdetector.listarCanais();
+      alert(
+        "Canais abertos agora:\n" + (c.abertos.join("\n") || "(nenhum)") +
+        "\n\nMonitorados:\n" + (c.monitorados.length ? c.monitorados.join("\n") : "TODOS")
+      );
+      console.log("[allInOne] canais:", c);
+    };
+    const todosBtn = el("button", "flex:1; padding:5px; border:none; border-radius:4px; background:#2c4fc7; color:#fff; cursor:pointer; font-size:11px;", "Monitorar TODOS");
+    todosBtn.onclick = () => { bot.Chatdetector.monitorarTodos(); renderCanais(); };
+    canaisBtnRow.appendChild(verCanaisBtn);
+    canaisBtnRow.appendChild(todosBtn);
+    wrap.appendChild(canaisBtnRow);
+
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Lista vazia = monitora todos. Mensagem em canal fora da lista é ignorada sem aparecer no console."));
 
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Termos vigiados:"));
     const watchedListEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
