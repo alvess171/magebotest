@@ -113,21 +113,66 @@
     },
     playAlarm() {
       try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        for (let i = 0; i < 3; i++) {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          gain.__allInOneBypass = true; // alarme do bot nunca é silenciado
-          osc.type = "square";
-          osc.frequency.value = 880;
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          const startAt = ctx.currentTime + i * 0.3;
-          gain.gain.setValueAtTime(0.2, startAt);
-          osc.start(startAt);
-          osc.stop(startAt + 0.15);
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+
+        // Um contexto só, reaproveitado. Criar um novo a cada alarme é o
+        // que fazia o som falhar no celular: sem gesto do usuário o
+        // contexto nasce "suspended" e não toca nada.
+        if (!bot.__alarmCtx) bot.__alarmCtx = new AC();
+        const ctx = bot.__alarmCtx;
+
+        const tocar = () => {
+          for (let i = 0; i < 3; i++) {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            gain.__allInOneBypass = true; // alarme do bot nunca é silenciado
+            osc.type = "square";
+            osc.frequency.value = 880;
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            const startAt = ctx.currentTime + i * 0.3;
+            gain.gain.setValueAtTime(0.25, startAt);
+            osc.start(startAt);
+            osc.stop(startAt + 0.15);
+          }
+        };
+
+        if (ctx.state === "suspended") {
+          ctx.resume().then(tocar).catch(() => {
+            log("playAlarm: áudio bloqueado pelo navegador — toque na tela uma vez pra liberar");
+            bot.armAlarmUnlock();
+          });
+        } else {
+          tocar();
         }
       } catch (e) { log("playAlarm failed", e?.message || e); }
+    },
+
+    // Navegador só libera áudio depois de um toque. Isso arma o
+    // desbloqueio no próximo toque/clique, uma vez só.
+    armAlarmUnlock() {
+      if (bot.__alarmUnlockArmed) return;
+      bot.__alarmUnlockArmed = true;
+      const desbloquear = () => {
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!bot.__alarmCtx && AC) bot.__alarmCtx = new AC();
+          bot.__alarmCtx?.resume?.();
+          log("alarme liberado — o som já funciona");
+        } catch {}
+        document.removeEventListener("touchend", desbloquear, true);
+        document.removeEventListener("mousedown", desbloquear, true);
+        bot.__alarmUnlockArmed = false;
+      };
+      document.addEventListener("touchend", desbloquear, true);
+      document.addEventListener("mousedown", desbloquear, true);
+    },
+
+    // Teste manual do alarme (serve pra liberar o áudio também)
+    testAlarm() {
+      bot.playAlarm();
+      return bot.__alarmCtx?.state || "sem contexto";
     },
   };
   const cleanupFns = [];
@@ -597,6 +642,10 @@
       lastHpHeal1At: 0, lastHpHeal2At: 0, lastManaHealAt: 0,
       lastHpAttempt1At: 0, lastHpAttempt2At: 0, lastManaAttemptAt: 0,
       pendingHpAttempt1: null, pendingHpAttempt2: null, pendingManaAttempt: null,
+      // Conta tentativas que não surtiram efeito (poção acabou, slot errado).
+      // Sem isso o módulo fica apertando a mesma tecla pra sempre.
+      falhas: { pendingHpAttempt1: 0, pendingHpAttempt2: 0, pendingManaAttempt: 0 },
+      pausaAte: { pendingHpAttempt1: 0, pendingHpAttempt2: 0, pendingManaAttempt: 0 },
     };
     const config = Object.assign(
       {
@@ -625,25 +674,44 @@
     function didHpHeal(stats, a) { return stats?.hp && a && stats.hp.current > a.hpBefore; }
     function didManaHeal(stats, a) { return stats?.mana && a && stats.mana.current > a.manaBefore; }
 
+    const MAX_FALHAS = 5;        // tentativas seguidas sem efeito
+    const PAUSA_MS = 20000;      // quanto tempo descansa depois disso
+
+    function registrarSucesso(chave) {
+      state.falhas[chave] = 0;
+      state.pausaAte[chave] = 0;
+    }
+
+    function registrarFalha(chave, now) {
+      state.falhas[chave] = (state.falhas[chave] || 0) + 1;
+      if (state.falhas[chave] >= MAX_FALHAS) {
+        state.pausaAte[chave] = now + PAUSA_MS;
+        state.falhas[chave] = 0;
+        log("heal: " + chave + " sem efeito " + MAX_FALHAS + "x seguidas — pausando " +
+            (PAUSA_MS / 1000) + "s (poção acabou? slot errado?)");
+      }
+    }
+
     function resolvePending(stats, now) {
       const cw = Math.max(50, Number(config.healConfirmMs) || 0);
       if (state.pendingHpAttempt2) {
-        if (didHpHeal(stats, state.pendingHpAttempt2)) { state.lastHpHeal2At = state.pendingHpAttempt2.attemptedAt; state.pendingHpAttempt2 = null; }
-        else if (now - state.pendingHpAttempt2.attemptedAt >= cw) state.pendingHpAttempt2 = null;
+        if (didHpHeal(stats, state.pendingHpAttempt2)) { state.lastHpHeal2At = state.pendingHpAttempt2.attemptedAt; state.pendingHpAttempt2 = null; registrarSucesso("pendingHpAttempt2"); }
+        else if (now - state.pendingHpAttempt2.attemptedAt >= cw) { state.pendingHpAttempt2 = null; registrarFalha("pendingHpAttempt2", now); }
       }
       if (state.pendingHpAttempt1) {
-        if (didHpHeal(stats, state.pendingHpAttempt1)) { state.lastHpHeal1At = state.pendingHpAttempt1.attemptedAt; state.pendingHpAttempt1 = null; }
-        else if (now - state.pendingHpAttempt1.attemptedAt >= cw) state.pendingHpAttempt1 = null;
+        if (didHpHeal(stats, state.pendingHpAttempt1)) { state.lastHpHeal1At = state.pendingHpAttempt1.attemptedAt; state.pendingHpAttempt1 = null; registrarSucesso("pendingHpAttempt1"); }
+        else if (now - state.pendingHpAttempt1.attemptedAt >= cw) { state.pendingHpAttempt1 = null; registrarFalha("pendingHpAttempt1", now); }
       }
       if (state.pendingManaAttempt) {
-        if (didManaHeal(stats, state.pendingManaAttempt)) { state.lastManaHealAt = state.pendingManaAttempt.attemptedAt; state.pendingManaAttempt = null; }
-        else if (now - state.pendingManaAttempt.attemptedAt >= cw) state.pendingManaAttempt = null;
+        if (didManaHeal(stats, state.pendingManaAttempt)) { state.lastManaHealAt = state.pendingManaAttempt.attemptedAt; state.pendingManaAttempt = null; registrarSucesso("pendingManaAttempt"); }
+        else if (now - state.pendingManaAttempt.attemptedAt >= cw) { state.pendingManaAttempt = null; registrarFalha("pendingManaAttempt", now); }
       }
     }
 
     function triggerHeal(slot, now, stats, pendingKey, lastHealKey, lastAttemptKey) {
       const s = normalizeSlot(slot);
       if (!s || state[pendingKey]) return false;
+      if (now < (state.pausaAte[pendingKey] || 0)) return false; // em descanso
       if (now - state[lastHealKey] < config.healCooldownMs) return false;
       if (now - state[lastAttemptKey] < Math.max(50, Number(config.healRetryMs) || 0)) return false;
       const clicked = bot.clickHotbar(s - 1);
@@ -2157,7 +2225,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   const config = Object.assign(
     {
       tickMs: 100,
-      targetHotbarSlot: 3,
+      targetHotbarSlot: null,   // null/0 = desligado (não aperta hotkey nenhuma)
       runeHotbarSlot: null,
       targetCooldownMs: 100,
       runeCooldownMs: 100,
@@ -2173,6 +2241,18 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   config.targetNames = normalizeTargetNames(config.targetNames);
   if (config.targetHotbarSlot == null && storedConfig.hotbarSlot != null) {
     config.targetHotbarSlot = storedConfig.hotbarSlot;
+  }
+
+  // MIGRAÇÃO ÚNICA: o slot 3 era um padrão de fábrica invisível (não tinha
+  // campo no painel). Fora do modo melee isso fazia o bot apertar F3 a cada
+  // 100ms sem que ninguém tivesse configurado nada. Zera uma vez só.
+  if (!storedConfig.__hotkeyMigrada) {
+    if (config.targetHotbarSlot === 3) {
+      config.targetHotbarSlot = null;
+      bot.log("auto attack: hotkey de alvo (F3) desativada — era um padrão antigo, ative na aba Attack se quiser");
+    }
+    config.__hotkeyMigrada = true;
+    persistConfig();
   }
 
   function persistConfig() {
@@ -2817,7 +2897,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
   function canAttack(now = Date.now()) {
     const slot = normalizeHotbarSlot(config.targetHotbarSlot);
-    if (!slot) {
+
+    // O slot da hotkey só é usado FORA do modo melee. No melee o alvo é
+    // selecionado por pacote, então exigir slot aqui quebrava o melee à toa.
+    if (!config.meleeMode && !slot) {
       return false;
     }
 
@@ -7687,13 +7770,14 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     const wrap = el("div");
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 2px;", "HP nível 2 (forte, prioridade alta):"));
     wrap.appendChild(makeField("Limite HP (%)", Heal.config.hpThreshold2, (v) => { Heal.config.hpThreshold2 = Math.min(100, Math.max(0, Number(v) || 60)); }, "number"));
-    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot2, (v) => { Heal.config.hpHotbarSlot2 = Number(v) || 2; }, "number"));
+    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot2, (v) => { Heal.config.hpHotbarSlot2 = Math.max(0, Math.trunc(Number(v) || 0)); }, "number"));
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 2px;", "HP nível 1 (fraco):"));
     wrap.appendChild(makeField("Limite HP (%)", Heal.config.hpThreshold1, (v) => { Heal.config.hpThreshold1 = Math.min(100, Math.max(0, Number(v) || 90)); }, "number"));
-    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot1, (v) => { Heal.config.hpHotbarSlot1 = Number(v) || 1; }, "number"));
+    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot1, (v) => { Heal.config.hpHotbarSlot1 = Math.max(0, Math.trunc(Number(v) || 0)); }, "number"));
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 2px;", "Mana:"));
     wrap.appendChild(makeField("Limite mana (%)", Heal.config.manaThreshold, (v) => { Heal.config.manaThreshold = Math.min(100, Math.max(0, Number(v) || 50)); }, "number"));
-    wrap.appendChild(makeField("Slot hotbar", Heal.config.manaHotbarSlot, (v) => { Heal.config.manaHotbarSlot = Number(v) || 3; }, "number"));
+    wrap.appendChild(makeField("Slot hotbar", Heal.config.manaHotbarSlot, (v) => { Heal.config.manaHotbarSlot = Math.max(0, Math.trunc(Number(v) || 0)); }, "number"));
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:6px 0;", "Slot 0 = desligado. Se a cura não fizer efeito 5x seguidas (poção acabou, slot errado), ele pausa 20s em vez de ficar apertando a tecla sem parar."));
     wrap.appendChild(makeToggleButton(Heal, "Heal"));
     return wrap;
   }
@@ -7902,6 +7986,12 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     wrap.appendChild(nameRow);
 
     wrap.appendChild(makeField("Distância máxima (tiles)", bot.attack.config.maxTargetDistance ?? 6, (v) => { bot.attack.updateConfig({ maxTargetDistance: Number(v) || 6 }); }, "number"));
+
+    wrap.appendChild(makeField("Hotkey pra selecionar alvo (0 = nenhuma)", bot.attack.config.targetHotbarSlot ?? 0, (v) => {
+      const n = Math.max(0, Math.trunc(Number(v) || 0));
+      bot.attack.updateConfig({ targetHotbarSlot: n === 0 ? null : n });
+    }, "number"));
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:6px;", "Só é usada com o modo melee DESMARCADO. Em 0, o bot não aperta hotkey nenhuma pra mirar."));
 
     const skillRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc;");
     const skillCheckbox = el("input");
@@ -8149,6 +8239,20 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     wrap.appendChild(returnRow);
 
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:8px 0 4px; border-top:1px solid #333; padding-top:8px;", "Comportamento do kill switch (GM):"));
+
+    const testAlarmBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#2c4fc7; color:#fff; cursor:pointer; font-size:11px;", "🔔 Testar alarme (e liberar o som)");
+    testAlarmBtn.onclick = () => {
+      const estado = bot.testAlarm();
+      if (estado !== "running") {
+        setTimeout(() => {
+          alert(bot.__alarmCtx?.state === "running"
+            ? "Som liberado! O alarme já funciona."
+            : "O navegador ainda está bloqueando o áudio. Toque na tela do jogo e teste de novo.");
+        }, 400);
+      }
+    };
+    wrap.appendChild(testAlarmBtn);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "O navegador só libera som depois de um toque seu. Teste uma vez por sessão pra garantir que o alarme vai tocar."));
 
     const keepWatchRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc; font-size:11px;");
     const keepWatchCheckbox = el("input");
@@ -9046,8 +9150,15 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     if (gmpanicStatusEl && bot.panic) {
       const s = bot.panic.status();
       if (s.visibleGameMasters.length) {
-        gmpanicStatusEl.textContent = "🚨 GM DETECTADO: " + s.visibleGameMasters.map((p) => p.name).join(", ");
-        gmpanicStatusEl.style.color = "#f55";
+        const nomes = s.visibleGameMasters.map((p) => p.name).join(", ");
+        if (!s.running) {
+          // Detecta ao vivo mesmo parado — mas aqui NADA vai acontecer.
+          gmpanicStatusEl.textContent = "🚨 GM: " + nomes + " — ⚠ MONITOR PARADO, nada será feito";
+          gmpanicStatusEl.style.color = "#f80";
+        } else {
+          gmpanicStatusEl.textContent = "🚨 GM DETECTADO: " + nomes;
+          gmpanicStatusEl.style.color = "#f55";
+        }
       } else if (s.killSwitchActive) {
         if (s.config.autoRestoreAfterKill && s.gmClearSince) {
           const faltam = Math.max(0, Math.ceil(
