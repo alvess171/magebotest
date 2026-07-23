@@ -1521,6 +1521,223 @@
     };
   })();
 
+  // ===== MÓDULO: AUTO RECONNECT (detecta queda, reconecta e religa tudo) =====
+  const AutoReconnect = (() => {
+    const KEY = "autoReconnect.config";
+    const config = Object.assign(
+      {
+        enabled: false,
+        clickButton: true,      // procura e clica no botão de reconectar
+        restoreModules: true,   // religa os módulos depois de reconectar
+        hardRestart: true,      // para e inicia de novo (estado limpo)
+        checkMs: 3000,
+        restoreDelayMs: 3000,
+        buttonTexts: ["reconnect", "reconectar", "reconnecting", "try again", "tentar novamente", "entrar", "login"],
+      },
+      bot.storage.get(KEY, {})
+    );
+
+    const state = {
+      running: false,
+      timerId: null,
+      wasConnected: true,
+      disconnectedAt: 0,
+      reconnectCount: 0,
+      lastRestoreAt: 0,
+      snapshot: null,
+      lastStatus: "parado",
+    };
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    // Estado da conexão — o cliente expõe isso de formas diferentes
+    // dependendo da versão, então tenta várias.
+    function isConnected() {
+      const gc = window.gameClient;
+      if (!gc) return false;
+      const nm = gc.networkManager || gc.network || gc.__network;
+      if (nm) {
+        if (typeof nm.isConnected === "function") { try { return !!nm.isConnected(); } catch {} }
+        if (typeof nm.connected === "boolean") return nm.connected;
+        const ws = nm.socket || nm.websocket || nm.__socket || nm.ws;
+        if (ws && typeof ws.readyState === "number") return ws.readyState === 1; // OPEN
+      }
+      return !!gc.player;
+    }
+
+    // Hook no console: é assim que o cliente anuncia queda/volta
+    if (!window.__allInOneNetHookInstalled) {
+      window.__allInOneNetHookInstalled = true;
+      const origLog = console.log.bind(console);
+      console.log = function (...args) {
+        origLog(...args);
+        try {
+          const txt = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
+          if (/Reconnected to the gameserver/i.test(txt)) {
+            window.dispatchEvent(new CustomEvent("allInOne:reconnected"));
+          } else if (/Disconnected|Connection lost|forcing reconnect|connection closed/i.test(txt)) {
+            window.dispatchEvent(new CustomEvent("allInOne:disconnected"));
+          }
+        } catch {}
+      };
+    }
+
+    function snapshotModules() {
+      const snap = {};
+      try {
+        getBootJobs().forEach(([name, mod]) => {
+          if (mod) snap[name] = modIsRunning(mod);
+        });
+      } catch (e) { log("autoReconnect: falha ao tirar snapshot", e?.message || e); }
+      return snap;
+    }
+
+    function findReconnectButton() {
+      const alvos = (config.buttonTexts || []).map((t) => String(t).toLowerCase());
+      const candidatos = document.querySelectorAll("button, a, div[role='button'], input[type='button'], input[type='submit']");
+      for (const elm of candidatos) {
+        if (!elm.offsetParent && elm.tagName !== "INPUT") continue; // invisível
+        const txt = String(elm.innerText || elm.value || "").trim().toLowerCase();
+        if (!txt || txt.length > 40) continue;
+        if (alvos.some((alvo) => txt.includes(alvo))) return elm;
+      }
+      return null;
+    }
+
+    function tryClickReconnect() {
+      if (!config.clickButton) return false;
+      const btn = findReconnectButton();
+      if (!btn) return false;
+      try {
+        btn.click();
+        log("autoReconnect: cliquei no botão de reconectar", { texto: (btn.innerText || btn.value || "").trim() });
+        return true;
+      } catch (e) {
+        log("autoReconnect: falha ao clicar", e?.message || e);
+        return false;
+      }
+    }
+
+    function restoreModules() {
+      if (!config.restoreModules) return;
+      const now = Date.now();
+      if (now - state.lastRestoreAt < 5000) return; // evita restaurar em duplicata
+      state.lastRestoreAt = now;
+
+      const snap = state.snapshot;
+      state.snapshot = null;
+
+      window.setTimeout(() => {
+        try {
+          if (config.hardRestart && snap) {
+            // Para e inicia de novo o que estava rodando: depois de uma
+            // reconexão o estado interno (alvo, rota, pathfinder) fica velho.
+            Object.entries(snap).forEach(([name, estavaRodando]) => {
+              if (!estavaRodando) return;
+              const entrada = getBootJobs().find(([n]) => n === name);
+              const mod = entrada?.[1];
+              if (!mod?.start) return;
+              try {
+                if (mod.stop) mod.stop({ persistEnabled: false });
+              } catch {}
+              try { mod.start(); } catch (e) { log("autoReconnect: falha ao religar " + name, e?.message || e); }
+            });
+          }
+          const religados = repair(); // pega qualquer um que ficou pra trás
+          state.lastStatus = "reconectado, módulos religados";
+          log("autoReconnect: módulos restaurados", { religados, snapshot: snap });
+          updatePanel();
+        } catch (e) {
+          log("autoReconnect: falha ao restaurar", e?.message || e);
+        }
+      }, Math.max(0, Number(config.restoreDelayMs) || 0));
+    }
+
+    function onDisconnected() {
+      if (!state.running) return;
+      if (!state.wasConnected) return;
+      state.wasConnected = false;
+      state.disconnectedAt = Date.now();
+      state.snapshot = snapshotModules();
+      state.lastStatus = "desconectado — tentando voltar";
+      log("autoReconnect: queda detectada", { snapshot: state.snapshot });
+      bot.playAlarm?.();
+      updatePanel();
+    }
+
+    function onReconnected() {
+      if (!state.running) return;
+      state.wasConnected = true;
+      state.reconnectCount++;
+      state.lastStatus = "reconectado";
+      log("autoReconnect: reconectado", { vezes: state.reconnectCount });
+      restoreModules();
+      updatePanel();
+    }
+
+    window.addEventListener("allInOne:disconnected", onDisconnected);
+    window.addEventListener("allInOne:reconnected", onReconnected);
+
+    function tick() {
+      if (!state.running) return;
+      try {
+        const conectado = isConnected();
+
+        if (!conectado && state.wasConnected) {
+          onDisconnected();
+        } else if (conectado && !state.wasConnected) {
+          onReconnected();
+        } else if (!conectado) {
+          // Continua caído: tenta o botão de reconectar
+          const clicou = tryClickReconnect();
+          const segundos = Math.round((Date.now() - state.disconnectedAt) / 1000);
+          state.lastStatus = "caído há " + segundos + "s" + (clicou ? " (cliquei em reconectar)" : "");
+        } else {
+          state.lastStatus = "conectado";
+        }
+      } catch (e) {
+        log("autoReconnect tick failed", e?.message || e);
+      }
+      updatePanel();
+      state.timerId = window.setTimeout(tick, Math.max(1000, Number(config.checkMs) || 3000));
+    }
+
+    function start() {
+      if (state.running) return;
+      state.running = true;
+      config.enabled = true;
+      persist();
+      state.wasConnected = isConnected();
+      state.lastStatus = state.wasConnected ? "conectado" : "desconectado";
+      log("autoReconnect iniciado", { ...config });
+      tick();
+    }
+
+    function stop() {
+      state.running = false;
+      config.enabled = false;
+      persist();
+      if (state.timerId != null) { clearTimeout(state.timerId); state.timerId = null; }
+      state.lastStatus = "parado";
+      updatePanel();
+    }
+
+    function updateConfig(next = {}) {
+      if ("checkMs" in next) next.checkMs = Math.max(1000, Number(next.checkMs) || 3000);
+      if ("restoreDelayMs" in next) next.restoreDelayMs = Math.max(0, Number(next.restoreDelayMs) || 0);
+      Object.assign(config, next);
+      persist();
+      return { ...config };
+    }
+
+    return {
+      config, start, stop, updateConfig, isConnected, findReconnectButton,
+      get running() { return state.running; },
+      get status() { return state.lastStatus; },
+      get reconnectCount() { return state.reconnectCount; },
+    };
+  })();
+
   // ===== MÓDULO: HAZARD STEPPER (passo manual através de fogo/campos perigosos) =====
   const HazardStepper = (() => {
     const state = { rafId: null, lastPositionKey: null, lastProgressAt: 0, running: false, stepsCount: 0 };
@@ -1665,66 +1882,211 @@
     return { start, stop, get running() { return state.running; }, get stepsCount() { return state.stepsCount; }, get status() { return lastStatus; } };
   })();
 
-  // ===== MÓDULO: PROFILES (salva/restaura config dos módulos deste painel) =====
+  // ===== MÓDULO: PROFILES (salva/restaura TUDO do bot) =====
   const Profiles = (() => {
-    const ALL_MODULES = { Rune, Haste, Eat, Ring, Monk, Stones, Panic, Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget };
     const LIST_KEY = "profiles.list";
     const ACTIVE_KEY = "profiles.active";
+    // Chaves que não fazem parte de um perfil
+    const IGNORAR = [LIST_KEY, ACTIVE_KEY, "performanceMode.quiet"];
+
+    // Módulos que guardam config em memória (closure). Reescrever o
+    // localStorage não atualiza quem já está rodando — precisa reaplicar.
+    function getConfigTargets() {
+      return [
+        ["rune.config", Rune], ["haste.config", Haste], ["eat.config", Eat],
+        ["ring.config", Ring], ["monk.config", Monk], ["stones.config", Stones],
+        ["panic.config", Panic], ["heal.config", Heal],
+        ["invisible.config", Invisible], ["magicShield.config", MagicShield],
+        ["follow.config", Follow], ["friendHeal.config", FriendHeal],
+        ["lastTarget.config", LastTarget],
+        ["attackHotkeyCaster.config", AttackSpellCaster],
+        ["hideSpellAnimations.config", HideSpellAnimations],
+        ["performanceMode.config", PerformanceMode],
+        ["zoomBlocker.config", ZoomBlocker],
+        ["swipeNavBlocker.config", SwipeNavBlocker],
+        ["fullscreen.config", Fullscreen],
+        ["autoReconnect.config", AutoReconnect],
+        ["minibiaBot.attack.config", bot.attack],
+        ["minibiaBot.cave.config", bot.cave],
+        ["minibiaBot.panic.config", bot.panic],
+        ["minibiaBot.drop.config", bot.drop],
+        ["minibiaBot.uhPlayer.config", bot.uhPlayer],
+        ["minibiaBot.chatDetector.config", bot.Chatdetector],
+        ["minibiaBot.talk.config", bot.talk],
+        ["minibiaBot.autoRingByCap.config", bot.autoRingByCap],
+        ["minibiaBot.autostack.config", bot.autostack],
+      ];
+    }
 
     function loadProfiles() { return bot.storage.get(LIST_KEY, {}) || {}; }
     function saveProfiles(p) { bot.storage.set(LIST_KEY, p); }
     function getActiveName() { return bot.storage.get(ACTIVE_KEY, null); }
     function setActiveName(name) { bot.storage.set(ACTIVE_KEY, name || null); }
 
-    function captureSnapshot() {
+    // Captura TODO o namespace do bot no localStorage: configs, rota do
+    // cave, presets, transições aprendidas, PZ salvo, origem do anel...
+    function captureStorage() {
       const snap = {};
-      for (const [name, mod] of Object.entries(ALL_MODULES)) snap[name] = { ...mod.config };
+      for (let i = 0; i < localStorage.length; i++) {
+        const chaveCompleta = localStorage.key(i);
+        if (!chaveCompleta || !chaveCompleta.startsWith(STORAGE_PREFIX)) continue;
+        const chave = chaveCompleta.slice(STORAGE_PREFIX.length);
+        if (IGNORAR.includes(chave)) continue;
+        snap[chave] = localStorage.getItem(chaveCompleta); // string crua
+      }
       return snap;
     }
 
-    function applySnapshot(snapshot) {
-      if (!snapshot) return false;
-      for (const [name, mod] of Object.entries(ALL_MODULES)) {
-        if (snapshot[name]) Object.assign(mod.config, snapshot[name]);
-      }
-      return true;
+    function restoreStorage(snap) {
+      let n = 0;
+      Object.entries(snap || {}).forEach(([chave, bruto]) => {
+        if (IGNORAR.includes(chave)) return;
+        try { localStorage.setItem(STORAGE_PREFIX + chave, bruto); n++; } catch {}
+      });
+      return n;
+    }
+
+    // Reaplica no que está em memória
+    function applyToModules() {
+      getConfigTargets().forEach(([chave, mod]) => {
+        if (!mod) return;
+        const salvo = bot.storage.get(chave, null);
+        if (!salvo || typeof salvo !== "object") return;
+        try {
+          if (mod.config) Object.assign(mod.config, salvo);
+          else if (typeof mod.updateConfig === "function") mod.updateConfig(salvo);
+        } catch (e) { log("profile: falha ao aplicar " + chave, e?.message || e); }
+      });
+
+      // Cave guarda rota/presets em variáveis próprias — importPresets recarrega
+      try {
+        const presets = bot.storage.get("minibiaBot.cave.presets", null);
+        if (presets?.length && bot.cave?.importPresets) {
+          bot.cave.importPresets({
+            presets,
+            activePresetName: bot.cave?.config?.activePresetName,
+          });
+        }
+      } catch (e) { log("profile: falha ao aplicar presets do cave", e?.message || e); }
+
+      // Hotkeys do cave
+      try {
+        const hk = bot.storage.get("minibiaBot.caveHotkey.config", null);
+        if (hk && bot.cave?.hotkey?.updateConfig) bot.cave.hotkey.updateConfig(hk);
+      } catch {}
+    }
+
+    // Liga/desliga cada módulo conforme o perfil carregado
+    function syncRunning() {
+      const mudou = [];
+      try {
+        getBootJobs().forEach(([nome, mod]) => {
+          if (!mod) return;
+          const deveRodar = modIsEnabled(mod);
+          const rodando = modIsRunning(mod);
+          try {
+            if (deveRodar && !rodando) { mod.start(); mudou.push("+" + nome); }
+            else if (!deveRodar && rodando) { mod.stop(); mudou.push("-" + nome); }
+          } catch (e) { log("profile: falha ao sincronizar " + nome, e?.message || e); }
+        });
+      } catch (e) { log("profile: falha no sync", e?.message || e); }
+      return mudou;
     }
 
     function list() { return Object.keys(loadProfiles()).sort(); }
 
     function save(name) {
-      const trimmed = String(name || "").trim();
-      if (!trimmed) return false;
+      const nome = String(name || "").trim();
+      if (!nome) return false;
       const profiles = loadProfiles();
-      profiles[trimmed] = { savedAt: Date.now(), configs: captureSnapshot() };
+      profiles[nome] = { savedAt: Date.now(), version: 2, storage: captureStorage() };
       saveProfiles(profiles);
-      setActiveName(trimmed);
-      log("perfil salvo:", trimmed);
+      setActiveName(nome);
+      log("perfil salvo (completo):", nome, {
+        chaves: Object.keys(profiles[nome].storage).length,
+      });
       return true;
     }
 
     function load(name) {
-      const trimmed = String(name || "").trim();
-      const profiles = loadProfiles();
-      const profile = profiles[trimmed];
-      if (!profile) { log("perfil não encontrado:", trimmed); return false; }
-      applySnapshot(profile.configs);
-      setActiveName(trimmed);
-      log("perfil carregado:", trimmed, "— ajuste manualmente cada campo no painel ou recarregue a página");
+      const nome = String(name || "").trim();
+      const profile = loadProfiles()[nome];
+      if (!profile) { log("perfil não encontrado:", nome); return false; }
+
+      if (profile.version === 2 && profile.storage) {
+        const n = restoreStorage(profile.storage);
+        applyToModules();
+        const mudou = syncRunning();
+        setActiveName(nome);
+        log("perfil carregado (completo):", nome, { chaves: n, modulos: mudou });
+      } else {
+        // Formato antigo: só os configs dos módulos do painel
+        const antigo = profile.configs || {};
+        const mapa = {
+          Rune, Haste, Eat, Ring, Monk, Stones, Panic, Heal,
+          Invisible, MagicShield, Follow, FriendHeal, LastTarget,
+        };
+        Object.entries(mapa).forEach(([k, mod]) => {
+          if (antigo[k] && mod?.config) Object.assign(mod.config, antigo[k]);
+        });
+        syncRunning();
+        setActiveName(nome);
+        log("perfil carregado (formato antigo):", nome);
+      }
+
+      try { renderBody(); } catch {}
+      updatePanel();
       return true;
     }
 
     function remove(name) {
-      const trimmed = String(name || "").trim();
+      const nome = String(name || "").trim();
       const profiles = loadProfiles();
-      if (!profiles[trimmed]) return false;
-      delete profiles[trimmed];
+      if (!profiles[nome]) return false;
+      delete profiles[nome];
       saveProfiles(profiles);
-      if (getActiveName() === trimmed) setActiveName(null);
+      if (getActiveName() === nome) setActiveName(null);
       return true;
     }
 
-    return { list, save, load, delete: remove, getActiveName };
+    // Exportar/importar pra passar entre aparelhos
+    function exportProfile(name) {
+      const nome = String(name || "").trim();
+      const profile = loadProfiles()[nome];
+      if (!profile) return null;
+      return JSON.stringify({ name: nome, ...profile }, null, 2);
+    }
+
+    function importProfile(json) {
+      try {
+        const dados = typeof json === "string" ? JSON.parse(json) : json;
+        const nome = String(dados?.name || "").trim();
+        if (!nome || !dados?.storage) { log("perfil inválido pra importar"); return false; }
+        const profiles = loadProfiles();
+        profiles[nome] = { savedAt: dados.savedAt || Date.now(), version: 2, storage: dados.storage };
+        saveProfiles(profiles);
+        log("perfil importado:", nome);
+        return nome;
+      } catch (e) {
+        log("falha ao importar perfil", e?.message || e);
+        return false;
+      }
+    }
+
+    function describe(name) {
+      const profile = loadProfiles()[String(name || "").trim()];
+      if (!profile) return null;
+      return {
+        salvoEm: profile.savedAt ? new Date(profile.savedAt).toLocaleString() : "?",
+        versao: profile.version || 1,
+        chaves: profile.storage ? Object.keys(profile.storage).length : 0,
+      };
+    }
+
+    return {
+      list, save, load, delete: remove, getActiveName,
+      exportProfile, importProfile, describe, captureStorage,
+    };
   })();
 
   // ===== MÓDULOS EMBUTIDOS (código original, adaptado pra rodar aqui dentro) =====
@@ -7128,6 +7490,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     { id: "talk", label: "Talk" },
     { id: "chat", label: "Chat" },
     { id: "fire", label: "Fire" },
+    { id: "reconn", label: "Reconn" },
     { id: "tela", label: "Tela" },
     { id: "misc", label: "Misc" },
     { id: "profiles", label: "Profiles" },
@@ -7345,11 +7708,26 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
 
   function buildProfilesTab() {
     const wrap = el("div");
-    const activeEl = el("div", "margin-bottom:8px; color:#9c9; font-size:11px;", "Ativo: " + (Profiles.getActiveName() || "nenhum"));
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:8px;", "Um perfil guarda TUDO: configs de todos os módulos, rota e presets do cave, transições aprendidas, PZ salvo e o que estava ligado."));
+
+    const activeEl = el("div", "margin-bottom:4px; color:#9c9; font-size:11px;", "Ativo: " + (Profiles.getActiveName() || "nenhum"));
     wrap.appendChild(activeEl);
+
+    const infoEl = el("div", "margin-bottom:8px; color:#666; font-size:10px;");
+    wrap.appendChild(infoEl);
 
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Perfis salvos:"));
     const listEl2 = el("select", "width:100%; padding:4px; margin-bottom:8px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee; box-sizing:border-box;");
+
+    function refreshInfo() {
+      const nome = listEl2.value;
+      const d = nome ? Profiles.describe(nome) : null;
+      infoEl.textContent = d
+        ? "Salvo em " + d.salvoEm + " — " + d.chaves + " chaves" + (d.versao < 2 ? " (formato antigo, parcial)" : "")
+        : "";
+    }
+
     function refreshList() {
       listEl2.innerHTML = "";
       const names = Profiles.list();
@@ -7360,21 +7738,19 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         listEl2.disabled = false;
         names.forEach((n) => { const o = el("option", null, n); o.value = n; listEl2.appendChild(o); });
       }
+      refreshInfo();
     }
+    listEl2.onchange = refreshInfo;
     refreshList();
     wrap.appendChild(listEl2);
 
     const updateBtn = el("button", "width:100%; padding:6px; margin-bottom:8px; border:none; border-radius:4px; cursor:pointer; background:#2c4fc7; color:#fff; font-weight:bold;", "💾 Salvar alterações no perfil ativo");
     updateBtn.onclick = () => {
       const activeName = Profiles.getActiveName();
-      if (!activeName) {
-        alert("Nenhum perfil ativo no momento. Carrega um perfil primeiro, ou usa 'Salvar como novo perfil' abaixo.");
-        return;
-      }
+      if (!activeName) { alert("Nenhum perfil ativo. Carregue um, ou use 'Salvar como novo perfil'."); return; }
       Profiles.save(activeName);
       refreshList();
       activeEl.textContent = "Ativo: " + (Profiles.getActiveName() || "nenhum");
-      log("perfil atualizado:", activeName);
     };
     wrap.appendChild(updateBtn);
 
@@ -7396,22 +7772,53 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
 
     const loadBtn = el("button", "width:100%; padding:6px; margin-bottom:6px; border:none; border-radius:4px; cursor:pointer; background:#2c4fc7; color:#fff; font-weight:bold;", "Carregar selecionado");
     loadBtn.onclick = () => {
-      if (!listEl2.value) return;
+      if (!listEl2.value || listEl2.disabled) return;
+      if (!confirm("Carregar \"" + listEl2.value + "\"? Isso substitui TODAS as configurações atuais.")) return;
       Profiles.load(listEl2.value);
-      activeEl.textContent = "Ativo: " + (Profiles.getActiveName() || "nenhum");
-      renderBody(); // refaz a aba atual pra refletir os novos valores nos campos
     };
     wrap.appendChild(loadBtn);
 
-    const deleteBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; background:#a33; color:#fff; font-weight:bold;", "Excluir selecionado");
+    const deleteBtn = el("button", "width:100%; padding:6px; margin-bottom:8px; border:none; border-radius:4px; cursor:pointer; background:#a33; color:#fff; font-weight:bold;", "Excluir selecionado");
     deleteBtn.onclick = () => {
-      if (!listEl2.value) return;
+      if (!listEl2.value || listEl2.disabled) return;
       if (!confirm("Excluir perfil: " + listEl2.value + "?")) return;
       Profiles.delete(listEl2.value);
       refreshList();
       activeEl.textContent = "Ativo: " + (Profiles.getActiveName() || "nenhum");
     };
     wrap.appendChild(deleteBtn);
+
+    wrap.appendChild(el("div", "border-top:1px solid #333; margin:4px 0 8px;"));
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:4px;", "Transferir entre aparelhos:"));
+
+    const exportBtn = el("button", "width:100%; padding:5px; margin-bottom:6px; border:none; border-radius:4px; cursor:pointer; background:#333; color:#ccc; font-size:11px;", "📤 Exportar selecionado (copia o texto)");
+    exportBtn.onclick = () => {
+      if (!listEl2.value || listEl2.disabled) return;
+      const json = Profiles.exportProfile(listEl2.value);
+      if (!json) return;
+      exportArea.value = json;
+      exportArea.style.display = "block";
+      try { exportArea.select(); document.execCommand("copy"); } catch {}
+      log("perfil exportado — o texto está na caixa abaixo");
+    };
+    wrap.appendChild(exportBtn);
+
+    const exportArea = el("textarea", "width:100%; height:70px; display:none; margin-bottom:6px; padding:4px; border-radius:4px; border:1px solid #444; background:#111; color:#9c9; font-size:9px; box-sizing:border-box;");
+    wrap.appendChild(exportArea);
+
+    const importArea = el("textarea", "width:100%; height:50px; margin-bottom:6px; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee; font-size:9px; box-sizing:border-box;");
+    importArea.placeholder = "cole aqui o perfil exportado";
+    wrap.appendChild(importArea);
+
+    const importBtn = el("button", "width:100%; padding:5px; border:none; border-radius:4px; cursor:pointer; background:#2d7a2d; color:#fff; font-size:11px;", "📥 Importar do texto acima");
+    importBtn.onclick = () => {
+      const nome = Profiles.importProfile(importArea.value);
+      if (!nome) { alert("Não consegui ler esse perfil."); return; }
+      importArea.value = "";
+      refreshList();
+      alert("Perfil \"" + nome + "\" importado. Selecione e clique em Carregar.");
+    };
+    wrap.appendChild(importBtn);
 
     return wrap;
   }
@@ -8363,6 +8770,80 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     return wrap;
   }
 
+  // ===== ABA: RECONN (auto reconectar e religar os módulos) =====
+  function buildReconnTab() {
+    const wrap = el("div");
+
+    wrap.appendChild(el("div", "color:#999; font-size:11px; margin-bottom:8px;", "Vigia a conexão. Se cair, tenta voltar e religa os módulos que estavam ativos."));
+
+    const statusEl = el("div", "margin-bottom:8px; font-size:11px;");
+    statusEl.dataset.reconnStatus = "1";
+    wrap.appendChild(statusEl);
+
+    const clickRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc; font-size:11px;");
+    const clickCheckbox = el("input");
+    clickCheckbox.type = "checkbox";
+    clickCheckbox.checked = !!AutoReconnect.config.clickButton;
+    clickCheckbox.onchange = () => AutoReconnect.updateConfig({ clickButton: clickCheckbox.checked });
+    clickRow.appendChild(clickCheckbox);
+    clickRow.appendChild(document.createTextNode("Clicar no botão de reconectar"));
+    wrap.appendChild(clickRow);
+
+    const restoreRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc; font-size:11px;");
+    const restoreCheckbox = el("input");
+    restoreCheckbox.type = "checkbox";
+    restoreCheckbox.checked = !!AutoReconnect.config.restoreModules;
+    restoreCheckbox.onchange = () => AutoReconnect.updateConfig({ restoreModules: restoreCheckbox.checked });
+    restoreRow.appendChild(restoreCheckbox);
+    restoreRow.appendChild(document.createTextNode("Religar módulos após reconectar"));
+    wrap.appendChild(restoreRow);
+
+    const hardRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer; color:#ccc; font-size:11px;");
+    const hardCheckbox = el("input");
+    hardCheckbox.type = "checkbox";
+    hardCheckbox.checked = !!AutoReconnect.config.hardRestart;
+    hardCheckbox.onchange = () => AutoReconnect.updateConfig({ hardRestart: hardCheckbox.checked });
+    hardRow.appendChild(hardCheckbox);
+    hardRow.appendChild(document.createTextNode("Reinício limpo (parar e iniciar)"));
+    wrap.appendChild(hardRow);
+
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Depois de reconectar, alvo e rota ficam velhos. O reinício limpo evita o bot andar pra um lugar que não existe mais."));
+
+    wrap.appendChild(makeField("Checar a cada (ms)", AutoReconnect.config.checkMs, (v) => {
+      AutoReconnect.updateConfig({ checkMs: Number(v) || 3000 });
+    }, "number"));
+
+    wrap.appendChild(makeField("Esperar antes de religar (ms)", AutoReconnect.config.restoreDelayMs, (v) => {
+      AutoReconnect.updateConfig({ restoreDelayMs: Number(v) || 3000 });
+    }, "number"));
+
+    const testBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "Testar: achou botão de reconectar?");
+    testBtn.onclick = () => {
+      const btn = AutoReconnect.findReconnectButton();
+      alert(btn
+        ? "Encontrei: \"" + String(btn.innerText || btn.value || "").trim() + "\""
+        : "Nenhum botão de reconectar visível agora (normal se estiver conectado).");
+    };
+    wrap.appendChild(testBtn);
+
+    const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff;");
+    function refreshToggle() {
+      const running = AutoReconnect.running;
+      toggleBtn.textContent = running ? "Stop Auto Reconnect" : "Start Auto Reconnect";
+      toggleBtn.style.background = running ? "#a33" : "#2d7a2d";
+    }
+    toggleBtn.onclick = () => {
+      AutoReconnect.running ? AutoReconnect.stop() : AutoReconnect.start();
+      refreshToggle();
+    };
+    refreshToggle();
+    toggleBtn.dataset.refreshable = "1";
+    toggleBtn._refresh = refreshToggle;
+    wrap.appendChild(toggleBtn);
+
+    return wrap;
+  }
+
   // ===== ABA: MISC (funções diversas — zoom blocker, e mais quando você mandar) =====
   function buildMiscTab() {
     const wrap = el("div");
@@ -8454,7 +8935,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     attack: buildAttackTab, uhplayer: buildUhPlayerTab, cave: buildCaveTab, gmpanic: buildGmPanicTab, drop: buildDropTab,
     pz: buildPzTab, talk: buildTalkTab, chat: buildChatTab, fire: buildFireTab,
     tela: buildTelaTab, misc: buildMiscTab,
-    ringcap: buildRingCapTab, stack: buildStackTab,
+    ringcap: buildRingCapTab, stack: buildStackTab, reconn: buildReconnTab,
   };
 
   function renderBody() {
@@ -8640,6 +9121,16 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         " — bag " + ((Number(s.config.targetBagIndex) || 0) + 1) +
         " | juntadas: " + s.merged;
       stackStatusEl.style.color = s.running ? "#5c5" : "#999";
+    }
+
+    // ── Reconn ──
+    const reconnStatusEl = bodyEl.querySelector("[data-reconn-status]");
+    if (reconnStatusEl) {
+      const conectado = AutoReconnect.isConnected();
+      reconnStatusEl.textContent =
+        (AutoReconnect.running ? "● " : "○ ") + AutoReconnect.status +
+        (AutoReconnect.reconnectCount ? " | quedas: " + AutoReconnect.reconnectCount : "");
+      reconnStatusEl.style.color = !AutoReconnect.running ? "#999" : (conectado ? "#5c5" : "#e77");
     }
 
     // ── Tela (fullscreen) ──
@@ -8857,6 +9348,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       ["Attack", bot.attack], ["Cave", bot.cave], ["Drop", bot.drop],
       ["UhPlayer", bot.uhPlayer], ["ChatDetector", bot.Chatdetector],
       ["RingCap", bot.autoRingByCap], ["AutoStack", bot.autostack],
+      ["AutoReconnect", AutoReconnect],
       ["PerformanceMode", PerformanceMode], ["HideSpellAnimations", HideSpellAnimations],
       ["ZoomBlocker", ZoomBlocker], ["SwipeNavBlocker", SwipeNavBlocker],
       // Talk fica de fora de propósito — só liga pelo botão
@@ -8943,12 +9435,13 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
     UhPlayer: bot.uhPlayer, AttackSpellCaster,
     RingCap: bot.autoRingByCap, AutoStack: bot.autostack,
+    AutoReconnect,
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
     ZoomBlocker, SwipeNavBlocker, PerformanceMode, HideSpellAnimations, Fullscreen,
     diagnose, repair,
   };
   
-  log("carregado. Painel com 27 abas criado no canto da tela.");
+  log("carregado. Painel com 28 abas criado no canto da tela.");
   
   // ✅ Expõe bot GLOBALMENTE para usar no console
   window.bot = bot;
