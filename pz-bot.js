@@ -1532,10 +1532,18 @@
         hardRestart: true,      // para e inicia de novo (estado limpo)
         checkMs: 3000,
         restoreDelayMs: 3000,
-        buttonTexts: ["reconnect", "reconectar", "reconnecting", "try again", "tentar novamente", "entrar", "login"],
+        // Só palavras de RECONEXÃO. Nada de "login"/"entrar": se cair na
+        // tela de usuário e senha, o bot NÃO deve mexer.
+        buttonTexts: ["reconnect", "reconectar", "reconnecting", "try again", "tentar novamente", "retry"],
       },
       bot.storage.get(KEY, {})
     );
+
+    // Se um perfil/localStorage antigo trouxe "login"/"entrar", remove.
+    const PROIBIDOS = ["login", "log in", "entrar", "sign in", "senha", "password", "acessar", "enter"];
+    config.buttonTexts = (config.buttonTexts || [])
+      .map((t) => String(t).toLowerCase().trim())
+      .filter((t) => t && !PROIBIDOS.includes(t));
 
     const state = {
       running: false,
@@ -1592,13 +1600,26 @@
       return snap;
     }
 
+    // Detecta tela de usuário/senha: aí o bot NÃO clica em nada.
+    // Reconectar é seguro; refazer login não é (e pode dar erro de sessão).
+    function isLoginScreen() {
+      const senhas = document.querySelectorAll('input[type="password"]');
+      for (const campo of senhas) {
+        if (campo.offsetParent !== null) return true; // visível
+      }
+      return false;
+    }
+
     function findReconnectButton() {
+      if (isLoginScreen()) return null; // trava de segurança
       const alvos = (config.buttonTexts || []).map((t) => String(t).toLowerCase());
+      if (!alvos.length) return null;
       const candidatos = document.querySelectorAll("button, a, div[role='button'], input[type='button'], input[type='submit']");
       for (const elm of candidatos) {
         if (!elm.offsetParent && elm.tagName !== "INPUT") continue; // invisível
         const txt = String(elm.innerText || elm.value || "").trim().toLowerCase();
         if (!txt || txt.length > 40) continue;
+        if (PROIBIDOS.some((p) => txt.includes(p))) continue; // nunca clica em login
         if (alvos.some((alvo) => txt.includes(alvo))) return elm;
       }
       return null;
@@ -1606,6 +1627,14 @@
 
     function tryClickReconnect() {
       if (!config.clickButton) return false;
+      if (isLoginScreen()) {
+        if (state.lastStatus !== "tela de login — precisa entrar na mão") {
+          log("autoReconnect: tela de usuário/senha detectada — não vou clicar");
+          bot.playAlarm?.();
+        }
+        state.lastStatus = "tela de login — precisa entrar na mão";
+        return false;
+      }
       const btn = findReconnectButton();
       if (!btn) return false;
       try {
@@ -1683,7 +1712,14 @@
       try {
         const conectado = isConnected();
 
-        if (!conectado && state.wasConnected) {
+        // Tela de usuário/senha tem prioridade: aqui o bot para e avisa
+        if (isLoginScreen()) {
+          if (state.lastStatus !== "🔑 tela de login — entre na mão") {
+            log("autoReconnect: tela de login na frente — parei de tentar");
+            bot.playAlarm?.();
+          }
+          state.lastStatus = "🔑 tela de login — entre na mão";
+        } else if (!conectado && state.wasConnected) {
           onDisconnected();
         } else if (conectado && !state.wasConnected) {
           onReconnected();
@@ -1731,7 +1767,7 @@
     }
 
     return {
-      config, start, stop, updateConfig, isConnected, findReconnectButton,
+      config, start, stop, updateConfig, isConnected, findReconnectButton, isLoginScreen,
       get running() { return state.running; },
       get status() { return state.lastStatus; },
       get reconnectCount() { return state.reconnectCount; },
@@ -8809,6 +8845,8 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
 
     wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Depois de reconectar, alvo e rota ficam velhos. O reinício limpo evita o bot andar pra um lugar que não existe mais."));
 
+    wrap.appendChild(el("div", "color:#e9a; font-size:10px; line-height:1.5; background:#111; border-radius:4px; padding:6px; margin-bottom:8px;", "🔑 Se cair na tela de usuário e senha, o bot para e toca o alarme — ele nunca preenche login. Só clica em botões de reconectar."));
+
     wrap.appendChild(makeField("Checar a cada (ms)", AutoReconnect.config.checkMs, (v) => {
       AutoReconnect.updateConfig({ checkMs: Number(v) || 3000 });
     }, "number"));
@@ -8819,6 +8857,10 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
 
     const testBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "Testar: achou botão de reconectar?");
     testBtn.onclick = () => {
+      if (AutoReconnect.isLoginScreen()) {
+        alert("Tela de usuário/senha detectada.\n\nO bot NÃO clica nada aqui — você precisa entrar na mão.");
+        return;
+      }
       const btn = AutoReconnect.findReconnectButton();
       alert(btn
         ? "Encontrei: \"" + String(btn.innerText || btn.value || "").trim() + "\""
