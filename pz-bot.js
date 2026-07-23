@@ -1147,7 +1147,7 @@
     const KEY = "attackHotkeyCaster.config";
     const state = { running: false, timerId: null, lastCastAt: 0 };
     const config = Object.assign(
-      { hotbarSlot: 1, delayMs: 2000, enabled: false },
+      { hotbarSlot: 1, delayMs: 2000, somenteNaPosicao: false, enabled: false },
       bot.storage.get(KEY, {})
     );
 
@@ -1161,6 +1161,19 @@
       }
     }
 
+    // Trava opcional: só solta a magia quando estiver colado no alvo
+    // (e em N/S/L/O, se o modo ortogonal estiver ligado no Attack).
+    function estaNaPosicao() {
+      if (!config.somenteNaPosicao) return true;
+      try {
+        return !!bot.attack?.estaNaPosicaoDeAtaque?.();
+      } catch {
+        return false;
+      }
+    }
+
+    let ultimoMotivo = "";
+
     function normalizeSlot(slot) {
       const n = Math.trunc(Number(slot));
       return Number.isFinite(n) && n >= 1 && n <= 12 ? n : null;
@@ -1172,8 +1185,11 @@
         const now = Date.now();
         const slot = normalizeSlot(config.hotbarSlot);
         if (slot && isInCombat() && now - state.lastCastAt >= Math.max(200, Number(config.delayMs) || 2000)) {
-          if (bot.clickHotbar(slot - 1)) {
+          if (!estaNaPosicao()) {
+            ultimoMotivo = "esperando posição";
+          } else if (bot.clickHotbar(slot - 1)) {
             state.lastCastAt = now;
+            ultimoMotivo = "";
             log("attack hotkey pressed, slot:", slot);
           }
         }
@@ -1194,7 +1210,9 @@
 
     if (config.enabled) start();
 
-    return { config, start, stop, isInCombat, get running() { return state.running; } };
+    return { config, start, stop, isInCombat, estaNaPosicao,
+             get motivo() { return ultimoMotivo; },
+             get running() { return state.running; } };
   })();
 
   // ===== MÓDULO: PZ RETURNER (insiste até chegar no PZ salvo, com limite de tempo) =====
@@ -2996,6 +3014,16 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return followed;
   }
 
+  // Está no lugar certo pra bater? Respeita a config de ortogonal.
+  function estaNaPosicaoDeAtaque() {
+    const target = getCurrentTarget() || getEngagedTarget();
+    if (!target) return false;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const targetPosition = normalizePosition(target.getPosition?.() || target.__position);
+    if (!playerPosition || !targetPosition) return false;
+    return estaNaPosicaoMelee(playerPosition, targetPosition);
+  }
+
   function canAttack(now = Date.now()) {
     const slot = normalizeHotbarSlot(config.targetHotbarSlot);
 
@@ -3286,6 +3314,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     getCurrentTarget,
     getCurrentFollowTarget,
     isCombatActive,
+    estaNaPosicaoDeAtaque,
     syncMeleeChase,
     normalizeHotbarSlot,
     config,
@@ -8446,6 +8475,23 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     wrap.appendChild(makeField("Slot da hotkey de ataque", AttackSpellCaster.config.hotbarSlot, (v) => { AttackSpellCaster.config.hotbarSlot = Math.min(12, Math.max(1, Number(v) || 1)); }, "number"));
     wrap.appendChild(makeField("Delay entre usos (ms)", AttackSpellCaster.config.delayMs, (v) => { AttackSpellCaster.config.delayMs = Math.max(200, Number(v) || 2000); }, "number"));
 
+    const posRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer; color:#ccc; font-size:11px;");
+    const posCheckbox = el("input");
+    posCheckbox.type = "checkbox";
+    posCheckbox.checked = !!AttackSpellCaster.config.somenteNaPosicao;
+    posCheckbox.onchange = () => {
+      AttackSpellCaster.config.somenteNaPosicao = posCheckbox.checked;
+      bot.storage.set("attackHotkeyCaster.config", { ...AttackSpellCaster.config });
+    };
+    posRow.appendChild(posCheckbox);
+    posRow.appendChild(document.createTextNode("Só usar quando estiver na posição"));
+    wrap.appendChild(posRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:6px; line-height:1.5;", "Segura a magia até estar colado no alvo — e em N/S/L/O, se o modo ortogonal acima estiver marcado."));
+
+    const casterStatusEl = el("div", "font-size:10px; margin-bottom:6px;");
+    casterStatusEl.dataset.casterStatus = "1";
+    wrap.appendChild(casterStatusEl);
+
     const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff; margin-top:6px;");
     function refreshToggle() {
       const running = bot.attack.status().running;
@@ -9709,6 +9755,21 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         ? (s.combatActive ? "● Em combate: " + (s.currentTarget?.name || "?") : "● Rodando (sem alvo)")
         : "○ Parado";
       attackStatusEl.style.color = s.running ? (s.combatActive ? "#e77" : "#5c5") : "#999";
+    }
+
+    // ── Hotkey de ataque (posição) ──
+    const casterStatusEl = bodyEl.querySelector("[data-caster-status]");
+    if (casterStatusEl) {
+      if (!AttackSpellCaster.running) {
+        casterStatusEl.textContent = "";
+      } else if (AttackSpellCaster.config.somenteNaPosicao) {
+        const ok = AttackSpellCaster.estaNaPosicao();
+        casterStatusEl.textContent = ok ? "● na posição — liberada" : "○ fora de posição — segurando";
+        casterStatusEl.style.color = ok ? "#5c5" : "#fc5";
+      } else {
+        casterStatusEl.textContent = "● ativa (sem trava de posição)";
+        casterStatusEl.style.color = "#5c5";
+      }
     }
 
     // ── Cave ──
