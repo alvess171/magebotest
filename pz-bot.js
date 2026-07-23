@@ -161,12 +161,38 @@
           bot.__alarmCtx?.resume?.();
           log("alarme liberado — o som já funciona");
         } catch {}
-        document.removeEventListener("touchend", desbloquear, true);
-        document.removeEventListener("mousedown", desbloquear, true);
-        bot.__alarmUnlockArmed = false;
+        // Só desarma se realmente destravou; senão continua tentando
+        if (bot.__alarmCtx?.state === "running") {
+          document.removeEventListener("touchend", desbloquear, true);
+          document.removeEventListener("mousedown", desbloquear, true);
+          bot.__alarmUnlockArmed = false;
+        }
       };
       document.addEventListener("touchend", desbloquear, true);
       document.addEventListener("mousedown", desbloquear, true);
+    },
+
+    // Aviso visual: se o navegador estiver bloqueando o som, pelo menos
+    // aparece algo na tela.
+    flashAlert(texto) {
+      try {
+        const existente = document.getElementById("allInOne-flash-alert");
+        if (existente) existente.remove();
+        const el = document.createElement("div");
+        el.id = "allInOne-flash-alert";
+        el.textContent = texto || "⚠ Alerta";
+        Object.assign(el.style, {
+          position: "fixed", top: "12px", left: "50%", transform: "translateX(-50%)",
+          background: "rgba(200,40,40,0.95)", color: "#fff", padding: "10px 20px",
+          borderRadius: "8px", fontSize: "15px", fontWeight: "bold",
+          fontFamily: "sans-serif", zIndex: "9999999", pointerEvents: "none",
+          boxShadow: "0 2px 14px rgba(0,0,0,0.6)", transition: "opacity 0.4s",
+          maxWidth: "90vw", textAlign: "center",
+        });
+        document.body.appendChild(el);
+        setTimeout(() => { el.style.opacity = "0"; }, 3000);
+        setTimeout(() => { el.remove(); }, 3600);
+      } catch {}
     },
 
     // Teste manual do alarme (serve pra liberar o áudio também)
@@ -175,6 +201,11 @@
       return bot.__alarmCtx?.state || "sem contexto";
     },
   };
+
+  // Destrava o áudio no PRIMEIRO toque/clique da sessão. Sem isso o
+  // alarme só falha na hora que importa: no iOS o contexto precisa ser
+  // liberado durante um gesto do usuário, e um alarme automático não é.
+  setTimeout(() => { try { bot.armAlarmUnlock(); } catch {} }, 0);
   const cleanupFns = [];
 
   // Declarados aqui em cima (não lá embaixo, perto do painel) porque módulos
@@ -6329,6 +6360,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
     if (deveAlarmar) {
       tocarAlarme();
+      // Reforço visual: se o som estiver bloqueado, ainda dá pra ver
+      const rotulo = bateuVigiado ? "🔎 TERMO VIGIADO" : (fuiMencionado ? "📣 MENÇÃO" : "💬 CHAT");
+      bot.flashAlert?.(rotulo + " — " + remetente + ": " + mensagem.slice(0, 60));
     }
   }
 
@@ -8829,6 +8863,18 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     }
     renderIgnoredList();
 
+    const somBtn = el("button", "width:100%; padding:5px; margin-bottom:6px; border:none; border-radius:4px; background:#2c4fc7; color:#fff; cursor:pointer; font-size:11px;", "🔔 Liberar/testar o som do alarme");
+    somBtn.onclick = () => {
+      bot.testAlarm();
+      setTimeout(() => {
+        const ok = bot.__alarmCtx?.state === "running";
+        bot.flashAlert?.(ok ? "🔊 Som liberado" : "🔇 Som ainda bloqueado");
+        updatePanel();
+      }, 400);
+    };
+    wrap.appendChild(somBtn);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "O navegador só libera áudio após um toque seu. Aperte isso uma vez por sessão."));
+
     const testRow = el("div", "display:flex; gap:4px; margin-bottom:8px;");
     const testInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
     testInput.placeholder = "texto pra testar";
@@ -9577,8 +9623,10 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     const chatStatusEl = bodyEl.querySelector("[data-chat-status]");
     if (chatStatusEl && bot.Chatdetector) {
       const s = bot.Chatdetector.status();
-      chatStatusEl.textContent = s.running ? "● Monitorando chat (" + (s.playerName || "?") + ")" : "○ Parado";
-      chatStatusEl.style.color = s.running ? "#5c5" : "#999";
+      const audioOk = bot.__alarmCtx?.state === "running";
+      chatStatusEl.textContent = (s.running ? "● Monitorando chat (" + (s.playerName || "?") + ")" : "○ Parado")
+        + (s.running ? (audioOk ? " | 🔊 som ok" : " | 🔇 som travado") : "");
+      chatStatusEl.style.color = !s.running ? "#999" : (audioOk ? "#5c5" : "#fc5");
     }
 
     // ── Ring Cap ──
