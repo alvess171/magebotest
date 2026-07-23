@@ -2267,6 +2267,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     lastFollowProgressAt: 0,
     lastFollowStallAt: 0,
     lastSkillTrainSwitchAt: 0,
+    reposicionandoDesde: 0,
+    avisouReposicao: false,
     skippedTargetIds: new Map(),
   };
 
@@ -2929,6 +2931,20 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return null;
   }
 
+  // Anda por pathfinding até um tile específico (o follow do servidor não
+  // serve aqui: ele para em qualquer adjacente, inclusive diagonal).
+  function irParaPosicao(pos) {
+    const from = bot.getPlayerPosition();
+    if (!from || !pos || typeof Position !== "function") return false;
+    try {
+      window.gameClient?.world?.pathfinder?.findPath?.(from, new Position(pos.x, pos.y, pos.z));
+      return true;
+    } catch (error) {
+      bot.log("auto attack: falha ao andar até a posição", error?.message || error);
+      return false;
+    }
+  }
+
   function syncMeleeChase(now = Date.now()) {
     if (!config.meleeMode) {
       return false;
@@ -2961,10 +2977,43 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     // ele continua se reposicionando até ficar em N/S/L/O.
     if (estaNaPosicaoMelee(playerPosition, targetPosition)) {
       state.lastChaseDestinationKey = null;
+      state.reposicionandoDesde = 0;
       clearCurrentFollowTarget();
       resetFollowProgress();
       return false;
     }
+
+    // CASO ESPECIAL: já está colado, mas na diagonal (com ortogonal ligado).
+    // O follow do servidor não vai mexer — pra ele já chegou. Aqui é preciso
+    // andar na mão até o tile ortogonal.
+    if (isAdjacentTile(playerPosition, targetPosition)) {
+      clearCurrentFollowTarget();
+
+      if (!state.reposicionandoDesde) state.reposicionandoDesde = now;
+
+      // Se não conseguir em 1s (monstro encurralado, parede), aceita a
+      // diagonal em vez de ficar parado.
+      if (now - state.reposicionandoDesde > 1000) {
+        if (!state.avisouReposicao) {
+          state.avisouReposicao = true;
+          bot.log("auto attack: não achei tile ortogonal livre, aceitando diagonal");
+        }
+        return false;
+      }
+
+      if (now - state.lastChaseAt >= 400) {
+        const destino = findReachableAdjacentPosition(targetPosition, playerPosition);
+        if (destino && getPositionKey(destino) !== getPositionKey(playerPosition)) {
+          irParaPosicao(destino);
+          state.lastChaseAt = now;
+          bot.log("auto attack: reposicionando pra ortogonal", { destino });
+        }
+      }
+      return true;
+    }
+
+    state.reposicionandoDesde = 0;
+    state.avisouReposicao = false;
 
     const adjacentPosition = findReachableAdjacentPosition(targetPosition, playerPosition);
     if (!adjacentPosition) {
