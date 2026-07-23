@@ -6193,6 +6193,8 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     qtdBips: 3,
     canaisPermitidos: ["Default", "Console"],
     ignorarSeContiver: ["hitpoints", "attack"],
+    esconderIgnoradas: false, // false = só não alarma, mas a msg continua visível no chat
+    avisoVisual: false,       // faixa vermelha no topo da tela
     termosVigiados: [],
     pollIntervalMs: 500,
   };
@@ -6326,7 +6328,9 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
     // filtro de ignorados (ex: "human" deve passar mesmo numa mensagem
     // de combate que também contenha "attack").
     if (!bateuVigiadoPreCheck && deveIgnorar(mensagem, remetente)) {
-      ocultarMensagemNoDOM(remetente, mensagem);
+      // Por padrão a mensagem CONTINUA no chat do jogo — só não alarma.
+      // Esconder de verdade é opcional (deixa o Default limpo).
+      if (config.esconderIgnoradas) ocultarMensagemNoDOM(remetente, mensagem);
       return;
     }
 
@@ -6361,9 +6365,10 @@ window.__minibiaBotBundle.installChatdetectorModule = function installChatdetect
 
     if (deveAlarmar) {
       tocarAlarme();
-      // Reforço visual: se o som estiver bloqueado, ainda dá pra ver
-      const rotulo = bateuVigiado ? "🔎 TERMO VIGIADO" : (fuiMencionado ? "📣 MENÇÃO" : "💬 CHAT");
-      bot.flashAlert?.(rotulo + " — " + remetente + ": " + mensagem.slice(0, 60));
+      if (config.avisoVisual) {
+        const rotulo = bateuVigiado ? "🔎 TERMO VIGIADO" : (fuiMencionado ? "📣 MENÇÃO" : "💬 CHAT");
+        bot.flashAlert?.(rotulo + " — " + remetente + ": " + mensagem.slice(0, 60));
+      }
     }
   }
 
@@ -8881,6 +8886,25 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     watchedRow.appendChild(watchedCheckbox);
     watchedRow.appendChild(document.createTextNode("Alarme em termos vigiados"));
     wrap.appendChild(watchedRow);
+
+    const visualRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:6px; cursor:pointer; color:#ccc;");
+    const visualCheckbox = el("input");
+    visualCheckbox.type = "checkbox";
+    visualCheckbox.checked = !!bot.Chatdetector.status().config.avisoVisual;
+    visualCheckbox.onchange = () => bot.Chatdetector.updateConfig({ avisoVisual: visualCheckbox.checked });
+    visualRow.appendChild(visualCheckbox);
+    visualRow.appendChild(document.createTextNode("Mostrar faixa vermelha na tela"));
+    wrap.appendChild(visualRow);
+
+    const esconderRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer; color:#ccc;");
+    const esconderCheckbox = el("input");
+    esconderCheckbox.type = "checkbox";
+    esconderCheckbox.checked = !!bot.Chatdetector.status().config.esconderIgnoradas;
+    esconderCheckbox.onchange = () => bot.Chatdetector.updateConfig({ esconderIgnoradas: esconderCheckbox.checked });
+    esconderRow.appendChild(esconderCheckbox);
+    esconderRow.appendChild(document.createTextNode("Sumir com as mensagens ignoradas do chat"));
+    wrap.appendChild(esconderRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Desmarcado (padrão): a lista de ignorados só evita o alarme — as mensagens continuam aparecendo normalmente no Default."));
 
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Canais monitorados:"));
     const canaisListEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
