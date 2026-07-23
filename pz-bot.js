@@ -2232,6 +2232,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       maxTargetDistance: 6,
       meleeMode: true,
       meleeFollow: true,   // false = ataca sem perseguir (fica parado)
+      meleeNoFollowRange: 1, // alcance usado SÓ quando o follow está desligado
       targetNames: [],
       skillTrainOnMonster: false,
       skillTrainRetargetMs: 50,
@@ -2620,10 +2621,22 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return getTileDistance(playerPosition, targetPosition) <= 1;
   }
 
-  // Melee sem follow: só faz sentido mirar quem está ao alcance do golpe.
-  // Sem isso ele travaria mirando um bicho longe que nunca vai alcançar.
+  // Melee sem follow: em vez de perseguir, ele só engaja quem já está
+  // dentro da "Distância máxima" configurada. Assim 1 = só encostado
+  // (melee puro parado) e 4 = engaja qualquer um num raio de 4 sqm.
   function apenasAdjacentes() {
     return !!config.meleeMode && !config.meleeFollow;
+  }
+
+  function getNoFollowRange() {
+    const v = Math.trunc(Number(config.meleeNoFollowRange));
+    return Number.isFinite(v) && v >= 1 ? Math.min(15, v) : 1;
+  }
+
+  function estaNoAlcanceSemFollow(monster, playerPosition) {
+    const targetPosition = normalizePosition(monster?.getPosition?.() || monster?.__position);
+    if (!playerPosition || !targetPosition || playerPosition.z !== targetPosition.z) return false;
+    return getTileDistance(playerPosition, targetPosition) <= getNoFollowRange();
   }
 
   function getMonsterCandidates(now = Date.now()) {
@@ -2633,7 +2646,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return getNearbyMonsters()
       .filter((monster) => !isTargetSkipped(monster, now))
       .filter((monster) => !config.skillTrainOnMonster || isReachableSkillTrainTarget(monster, playerPosition))
-      .filter((monster) => !apenasAdjacentes() || isReachableSkillTrainTarget(monster, playerPosition))
+      .filter((monster) => !apenasAdjacentes() || estaNoAlcanceSemFollow(monster, playerPosition))
       .sort((left, right) => {
         const leftDistance = getTileDistance(playerPosition, normalizePosition(left?.getPosition?.() || left?.__position));
         const rightDistance = getTileDistance(playerPosition, normalizePosition(right?.getPosition?.() || right?.__position));
@@ -2732,10 +2745,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return !isReachableSkillTrainTarget(target, playerPosition);
     }
 
-    // Sem follow: se o bicho saiu do alcance, larga logo pra pegar
-    // outro que esteja colado — senão ficaria parado mirando o vazio.
+    // Sem follow: larga quem saiu da distância configurada, pra poder
+    // engajar outro que ainda esteja no alcance.
     if (apenasAdjacentes()) {
-      return !isReachableSkillTrainTarget(target, playerPosition);
+      return !estaNoAlcanceSemFollow(target, playerPosition);
     }
 
     return getTileDistance(playerPosition, targetPosition) > getMaxTargetDistance();
@@ -3162,6 +3175,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       );
     }
 
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "meleeNoFollowRange")) {
+      nextConfig.meleeNoFollowRange = Math.min(15, Math.max(1,
+        Math.trunc(Number(nextConfig.meleeNoFollowRange) || 1)));
+    }
+
     if (Object.prototype.hasOwnProperty.call(nextConfig, "meleeFollow") && !nextConfig.meleeFollow) {
       // Desligou o follow: solta o alvo que estava sendo perseguido agora
       try { clearCurrentFollowTarget(); resetFollowProgress(); } catch {}
@@ -3256,6 +3274,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       waypointTolerance: 5,  //  Se você aumentar esse número, ele vai marcar como "chegado" mais cedo 
       waypointLookahead: 12,
       pauseUntilClear: true,
+      pauseRange: 8,        // raio (sqm) pra considerar "monstro por perto"
       pauseUntilSpawn: true,
       strictOrder: false,   // true = ordem estrita sem pulos | false = lookahead (comportamento original)
       pauseUntilSpawnFloorOffset: 1,
@@ -3565,10 +3584,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return !!waypoint && waypoint.type === "delay";
   }
 
+  function getPauseRange() {
+    const v = Math.trunc(Number(config.pauseRange));
+    return Number.isFinite(v) && v >= 1 ? Math.min(8, v) : 8;
+  }
+
   function getNearbyCreatures() {
-    // Agora pausa pra QUALQUER monstro visível via bot.xray — não depende
-    // mais da lista de "Monstros alvo" configurada na aba Attack.
-    return bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+    // Pausa pra QUALQUER monstro visível, mas só dentro do raio configurado
+    // (o campo de visão do cliente é 8x6, então o máximo útil é 8).
+    const monstros = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+    const eu = normalizePosition(bot.getPlayerPosition());
+    if (!eu) return monstros;
+    const raio = getPauseRange();
+    return monstros.filter((c) => {
+      const p = normalizePosition(c?.__position || c?.getPosition?.());
+      if (!p) return false;
+      return Math.max(Math.abs(p.x - eu.x), Math.abs(p.y - eu.y)) <= raio;
+    });
   }
 
   function hasNearbyCreatures() {
@@ -4545,6 +4577,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("minProximitySkip" in nextConfig) nextConfig.minProximitySkip = Math.max(1, Math.min(20, Math.trunc(Number(nextConfig.minProximitySkip) || 3)));
     if ("proximitySkipEnabled" in nextConfig) nextConfig.proximitySkipEnabled = !!nextConfig.proximitySkipEnabled;
     if ("strictOrder" in nextConfig) nextConfig.strictOrder = !!nextConfig.strictOrder;
+    if ("pauseRange" in nextConfig) nextConfig.pauseRange = Math.min(8, Math.max(1, Math.trunc(Number(nextConfig.pauseRange) || 8)));
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
@@ -8150,7 +8183,14 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     followRow.appendChild(followCheckbox);
     followRow.appendChild(document.createTextNode("↳ Perseguir o alvo (auto-follow)"));
     wrap.appendChild(followRow);
-    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:0 0 8px 20px; line-height:1.5;", "Marcado: anda atrás do monstro até encostar. Desmarcado: fica parado e só bate em quem chegar do lado."));
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:0 0 6px 20px; line-height:1.5;", "Marcado: anda atrás do monstro até encostar. Desmarcado: fica parado e só engaja quem entrar no alcance abaixo."));
+
+    const noFollowWrap = el("div", "margin:0 0 8px 20px;");
+    noFollowWrap.appendChild(makeField("↳ Alcance sem perseguir (sqm)", bot.attack.config.meleeNoFollowRange ?? 1, (v) => {
+      bot.attack.updateConfig({ meleeNoFollowRange: Number(v) || 1 });
+    }, "number"));
+    noFollowWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 = só quem encostar (melee puro). Maior que 1 só ajuda se você usar a hotkey de ataque pra magia/runa à distância."));
+    wrap.appendChild(noFollowWrap);
 
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Monstros alvo (vazio = qualquer um):"));
     const namesListEl = el("div", "max-height:70px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
@@ -8364,8 +8404,15 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     pauseClearCheckbox.checked = !!bot.cave.config.pauseUntilClear;
     pauseClearCheckbox.onchange = () => bot.cave.updateConfig({ pauseUntilClear: pauseClearCheckbox.checked });
     pauseClearRow.appendChild(pauseClearCheckbox);
-    pauseClearRow.appendChild(document.createTextNode("Pausar se tiver monstro alvo por perto"));
+    pauseClearRow.appendChild(document.createTextNode("Pausar se tiver monstro por perto"));
     wrap.appendChild(pauseClearRow);
+
+    const raioWrap = el("div", "margin:0 0 6px 20px;");
+    raioWrap.appendChild(makeField("↳ Raio pra considerar \"por perto\" (sqm)", bot.cave.config.pauseRange ?? 8, (v) => {
+      bot.cave.updateConfig({ pauseRange: Number(v) || 8 });
+    }, "number"));
+    raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 a 8. Menor = só para quando o bicho já está colado; 8 = para com qualquer um na tela."));
+    wrap.appendChild(raioWrap);
 
     const strictRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer; color:#ccc; font-size:11px;");
     const strictCheckbox = el("input");
