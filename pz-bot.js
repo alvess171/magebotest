@@ -2231,6 +2231,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       runeCooldownMs: 100,
       maxTargetDistance: 6,
       meleeMode: true,
+      meleeFollow: true,   // false = ataca sem perseguir (fica parado)
       targetNames: [],
       skillTrainOnMonster: false,
       skillTrainRetargetMs: 50,
@@ -2619,6 +2620,12 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return getTileDistance(playerPosition, targetPosition) <= 1;
   }
 
+  // Melee sem follow: só faz sentido mirar quem está ao alcance do golpe.
+  // Sem isso ele travaria mirando um bicho longe que nunca vai alcançar.
+  function apenasAdjacentes() {
+    return !!config.meleeMode && !config.meleeFollow;
+  }
+
   function getMonsterCandidates(now = Date.now()) {
     pruneSkippedTargets(now);
 
@@ -2626,6 +2633,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return getNearbyMonsters()
       .filter((monster) => !isTargetSkipped(monster, now))
       .filter((monster) => !config.skillTrainOnMonster || isReachableSkillTrainTarget(monster, playerPosition))
+      .filter((monster) => !apenasAdjacentes() || isReachableSkillTrainTarget(monster, playerPosition))
       .sort((left, right) => {
         const leftDistance = getTileDistance(playerPosition, normalizePosition(left?.getPosition?.() || left?.__position));
         const rightDistance = getTileDistance(playerPosition, normalizePosition(right?.getPosition?.() || right?.__position));
@@ -2721,6 +2729,12 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     if (config.skillTrainOnMonster) {
+      return !isReachableSkillTrainTarget(target, playerPosition);
+    }
+
+    // Sem follow: se o bicho saiu do alcance, larga logo pra pegar
+    // outro que esteja colado — senão ficaria parado mirando o vazio.
+    if (apenasAdjacentes()) {
       return !isReachableSkillTrainTarget(target, playerPosition);
     }
 
@@ -2823,6 +2837,15 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
   function syncMeleeChase(now = Date.now()) {
     if (!config.meleeMode) {
+      return false;
+    }
+
+    // Melee sem auto-follow: seleciona e bate, mas não sai andando atrás.
+    // Útil pra treinar parado ou não ser puxado pra fora do lugar.
+    if (!config.meleeFollow) {
+      clearCurrentFollowTarget();
+      resetFollowProgress();
+      state.lastChaseDestinationKey = null;
       return false;
     }
 
@@ -3137,6 +3160,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
         250,
         Math.trunc(Number(nextConfig.skillTrainRetargetMs) || config.skillTrainRetargetMs || 1500)
       );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "meleeFollow") && !nextConfig.meleeFollow) {
+      // Desligou o follow: solta o alvo que estava sendo perseguido agora
+      try { clearCurrentFollowTarget(); resetFollowProgress(); } catch {}
     }
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "runeCooldownMs")) {
@@ -6442,6 +6470,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     erros429: 0,
     backoffAte: 0,
     ultimoMotivo429: null,
+    cotaDiariaEsgotada: false,
   };
   const greetingReplies = ["yo", "sup", "hey", "hiya", "yo lol"];
   const agreeReplies = ["true", "fr", "based", "ya", "real"];
@@ -6849,9 +6878,16 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
         const retry = errorText.match(/"retryDelay"\s*:\s*"(\d+)s"/);
 
         if (cotaDiaria) {
-          // Cota do DIA estourada: não adianta tentar de novo em segundos.
-          espera = 60 * 60 * 1000; // 1 hora
+          // Cota do DIA acabou: não adianta tentar de novo hoje.
+          // Desliga o módulo pra parar de sujar o console com 429.
+          espera = 60 * 60 * 1000;
           motivo = "cota DIÁRIA esgotada";
+          state.cotaDiariaEsgotada = true;
+          bot.log("talk: COTA DIÁRIA ESGOTADA — desligando o Talk. " +
+                  "A cota zera à meia-noite no horário do Pacífico (~5h no Brasil). " +
+                  "Pra continuar hoje: crie um PROJETO novo no Google Cloud (chave nova no mesmo projeto divide a mesma cota) ou troque de modelo.");
+          bot.playAlarm?.();
+          window.setTimeout(() => { try { stop(); } catch {} }, 100);
         } else if (retry) {
           espera = Math.max(espera, (Number(retry[1]) + 5) * 1000);
         }
@@ -7123,6 +7159,9 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     }
 
     state.running = true;
+    state.cotaDiariaEsgotada = false;
+    state.backoffAte = 0;
+    state.erros429 = 0;
     seedSeenMessages();
     bot.log("talk module started", {
       model: config.model,
@@ -7157,6 +7196,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       mudoPorGm: state.mudoPorGm,
       backoffAte: state.backoffAte || 0,
       motivo429: state.ultimoMotivo429 || null,
+      cotaDiariaEsgotada: state.cotaDiariaEsgotada,
       config: {
         ...config,
         apiKey: config.apiKey ? "***configured***" : "",
@@ -8102,6 +8142,16 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     meleeRow.appendChild(document.createTextNode("Modo melee (ataca sozinho, sem hotkey)"));
     wrap.appendChild(meleeRow);
 
+    const followRow = el("label", "display:flex; align-items:center; gap:6px; margin:0 0 4px 20px; cursor:pointer; color:#ccc; font-size:11px;");
+    const followCheckbox = el("input");
+    followCheckbox.type = "checkbox";
+    followCheckbox.checked = !!bot.attack.config.meleeFollow;
+    followCheckbox.onchange = () => bot.attack.updateConfig({ meleeFollow: followCheckbox.checked });
+    followRow.appendChild(followCheckbox);
+    followRow.appendChild(document.createTextNode("↳ Perseguir o alvo (auto-follow)"));
+    wrap.appendChild(followRow);
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:0 0 8px 20px; line-height:1.5;", "Marcado: anda atrás do monstro até encostar. Desmarcado: fica parado e só bate em quem chegar do lado."));
+
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Monstros alvo (vazio = qualquer um):"));
     const namesListEl = el("div", "max-height:70px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
     namesListEl.dataset.attackNamesList = "1";
@@ -8851,6 +8901,42 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Desmarcado (recomendado): classifica localmente e usa 1 requisição por resposta em vez de 2."));
     wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px;", "Desmarcado, ele fica calado com Game Master na tela e não responde nomes da lista de GM."));
 
+    const testModelBtn = el("button", "width:100%; padding:5px; margin-bottom:8px; border:none; border-radius:4px; background:#2c4fc7; color:#fff; cursor:pointer; font-size:11px;", "🔍 Testar quais modelos ainda têm cota");
+    testModelBtn.onclick = async () => {
+      const chave = bot.talk.config.apiKey;
+      if (!chave) { alert("Configure a API Key primeiro."); return; }
+      testModelBtn.textContent = "testando...";
+      const candidatos = [
+        "gemini-flash-latest", "gemini-2.0-flash", "gemini-2.0-flash-001",
+        "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-lite-latest",
+      ];
+      const linhas = [];
+      for (const m of candidatos) {
+        try {
+          const r = await fetch(
+            "https://generativelanguage.googleapis.com/v1beta/models/" + m + ":generateContent?key=" + encodeURIComponent(chave),
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ role: "user", parts: [{ text: "oi" }] }],
+                generationConfig: { maxOutputTokens: 20 },
+              }),
+            }
+          );
+          if (r.ok) linhas.push("✅ " + m + " — OK, tem cota");
+          else if (r.status === 429) linhas.push("🚫 " + m + " — cota esgotada");
+          else if (r.status === 404) linhas.push("— " + m + " — não existe pra sua chave");
+          else linhas.push("⚠ " + m + " — erro " + r.status);
+        } catch { linhas.push("⚠ " + m + " — falha de rede"); }
+      }
+      testModelBtn.textContent = "🔍 Testar quais modelos ainda têm cota";
+      alert("Resultado:\n\n" + linhas.join("\n") +
+            "\n\nCopie o nome de um com ✅ pro campo Modelo.");
+      console.log("[allInOne] teste de modelos:\n" + linhas.join("\n"));
+    };
+    wrap.appendChild(testModelBtn);
+
     wrap.appendChild(el("div", "color:#ccc; font-size:12px; font-weight:bold; margin-top:8px; margin-bottom:4px;", "📝 Prompts Customizáveis:"));
 
     const expandBtn = el("button", "width:100%; padding:5px; margin-bottom:6px; border:none; border-radius:4px; background:#333; color:#ccc; cursor:pointer; font-size:11px;", "▼ Mostrar prompts customizáveis");
@@ -9419,7 +9505,10 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       const s = bot.talk.status();
       const apiKey = s.config?.apiKey;
       const emBackoff = s.backoffAte && Date.now() < s.backoffAte;
-      if (s.mudoPorGm) {
+      if (s.cotaDiariaEsgotada) {
+        talkStatusEl.textContent = "🚫 Cota diária da API esgotada";
+        talkStatusEl.style.color = "#f55";
+      } else if (s.mudoPorGm) {
         talkStatusEl.textContent = "🚨 GM na tela — CALADO";
         talkStatusEl.style.color = "#f55";
       } else if (emBackoff) {
