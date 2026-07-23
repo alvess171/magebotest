@@ -2717,12 +2717,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   function estaNoAlcanceSemFollow(monster, playerPosition) {
     const targetPosition = normalizePosition(monster?.getPosition?.() || monster?.__position);
     if (!playerPosition || !targetPosition || playerPosition.z !== targetPosition.z) return false;
-    const alcance = getNoFollowRange();
-    // Parado + ortogonal + alcance 1: só engaja quem está em N/S/L/O
-    if (config.meleeOrtogonal && alcance === 1) {
-      return isOrtogonalTile(playerPosition, targetPosition);
-    }
-    return getTileDistance(playerPosition, targetPosition) <= alcance;
+    // O ortogonal NÃO filtra alvo aqui: se filtrasse, um mob na diagonal
+    // nunca seria selecionado e o reposicionamento nunca aconteceria.
+    // Ortogonal governa a POSIÇÃO de ataque, não quem pode ser mirado.
+    return getTileDistance(playerPosition, targetPosition) <= getNoFollowRange();
   }
 
   function getMonsterCandidates(now = Date.now()) {
@@ -2950,15 +2948,6 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    // Melee sem auto-follow: seleciona e bate, mas não sai andando atrás.
-    // Útil pra treinar parado ou não ser puxado pra fora do lugar.
-    if (!config.meleeFollow) {
-      clearCurrentFollowTarget();
-      resetFollowProgress();
-      state.lastChaseDestinationKey = null;
-      return false;
-    }
-
     const target = getEngagedTarget();
     if (!target) {
       clearEngagedTarget();
@@ -3014,6 +3003,16 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     state.reposicionandoDesde = 0;
     state.avisouReposicao = false;
+
+    // Daqui pra baixo é PERSEGUIR de verdade (andar até um mob distante).
+    // Ajustar a posição num mob já colado, acima, acontece mesmo com o
+    // follow desligado — são coisas diferentes.
+    if (!config.meleeFollow) {
+      clearCurrentFollowTarget();
+      resetFollowProgress();
+      state.lastChaseDestinationKey = null;
+      return false;
+    }
 
     const adjacentPosition = findReachableAdjacentPosition(targetPosition, playerPosition);
     if (!adjacentPosition) {
