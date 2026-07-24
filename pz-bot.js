@@ -3562,6 +3562,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pendingTransitionSource: null,
     pausedForCombat: false,
     pausedForCreatures: false,
+    pausadoPorMobs: false,  // histerese do lure
     pausedForSpawn: false,
     delayUntil: 0,
     delayWaypointIndex: null,
@@ -3580,6 +3581,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       waypointLookahead: 12,
       pauseUntilClear: true,
       pauseRange: 8,        // raio (sqm) pra considerar "monstro por perto"
+      pauseMinMonstros: 1,  // quantos mobs precisam estar perto pra pausar (lure)
+      pauseResumeMonstros: 0, // volta a andar quando sobrar ESTE tanto ou menos
       pauseUntilSpawn: true,
       strictOrder: false,   // true = ordem estrita sem pulos | false = lookahead (comportamento original)
       pauseUntilSpawnFloorOffset: 1,
@@ -3912,8 +3915,34 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return getNearbyCreatures().length > 0;
   }
 
+  function getPauseMinMonstros() {
+    const v = Math.trunc(Number(config.pauseMinMonstros));
+    return Number.isFinite(v) && v >= 1 ? v : 1;
+  }
+
+  function getPauseResumeMonstros() {
+    const v = Math.trunc(Number(config.pauseResumeMonstros));
+    const min = getPauseMinMonstros();
+    if (!Number.isFinite(v) || v < 0) return 0;
+    // Retomar não pode ser >= o de pausar, senão ele nem chega a parar
+    return Math.min(v, min - 1);
+  }
+
+  // Duas travas diferentes (histerese):
+  //   PARA quando junta N mobs
+  //   SÓ VOLTA a andar quando sobrar M ou menos
+  // Sem isso ele voltaria a andar assim que matasse um único bicho,
+  // com o resto ainda em cima.
   function shouldPauseForCreatures() {
-    return !!config.pauseUntilClear && hasNearbyCreatures();
+    if (!config.pauseUntilClear) { state.pausadoPorMobs = false; return false; }
+
+    const qtd = getNearbyCreatures().length;
+    if (!state.pausadoPorMobs) {
+      if (qtd >= getPauseMinMonstros()) state.pausadoPorMobs = true;
+    } else if (qtd <= getPauseResumeMonstros()) {
+      state.pausadoPorMobs = false;
+    }
+    return state.pausadoPorMobs;
   }
 
   function getAttackTargetNames() {
@@ -4868,6 +4897,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pendingTransitionSource: cloneValue(state.pendingTransitionSource),
       pausedForCombat: state.pausedForCombat,
       pausedForCreatures: state.pausedForCreatures,
+      pausadoPorMobs: state.pausadoPorMobs,
       pausedForSpawn: state.pausedForSpawn,
       nearbyCreatureCount: getNearbyCreatures().length,
       spawnFloorCreatureCount: getSpawnFloorMonsters(position).length,
@@ -4888,6 +4918,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("proximitySkipEnabled" in nextConfig) nextConfig.proximitySkipEnabled = !!nextConfig.proximitySkipEnabled;
     if ("strictOrder" in nextConfig) nextConfig.strictOrder = !!nextConfig.strictOrder;
     if ("pauseRange" in nextConfig) nextConfig.pauseRange = Math.min(8, Math.max(1, Math.trunc(Number(nextConfig.pauseRange) || 8)));
+    if ("pauseMinMonstros" in nextConfig) nextConfig.pauseMinMonstros = Math.max(1, Math.trunc(Number(nextConfig.pauseMinMonstros) || 1));
+    if ("pauseResumeMonstros" in nextConfig) nextConfig.pauseResumeMonstros = Math.max(0, Math.trunc(Number(nextConfig.pauseResumeMonstros) || 0));
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
@@ -9048,6 +9080,21 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       bot.cave.updateConfig({ pauseRange: Number(v) || 8 });
     }, "number"));
     raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 a 8. Menor = só para quando o bicho já está colado; 8 = para com qualquer um na tela."));
+
+    raioWrap.appendChild(makeField("↳ Pausar só com quantos mobs (lure)", bot.cave.config.pauseMinMonstros ?? 1, (v) => {
+      bot.cave.updateConfig({ pauseMinMonstros: Number(v) || 1 });
+    }, "number"));
+    raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 = para com qualquer bicho. Maior = ele SEGUE andando puxando mob até juntar essa quantidade, e só então para pra lutar."));
+
+    raioWrap.appendChild(makeField("↳ Voltar a andar com quantos sobrando", bot.cave.config.pauseResumeMonstros ?? 0, (v) => {
+      bot.cave.updateConfig({ pauseResumeMonstros: Number(v) || 0 });
+    }, "number"));
+    raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "0 = só volta quando matar todos. 2 = volta quando sobrarem 2 ou menos. Precisa ser menor que o número de cima."));
+
+    const lureStatusEl = el("div", "font-size:10px; margin-top:4px;");
+    lureStatusEl.dataset.lureStatus = "1";
+    raioWrap.appendChild(lureStatusEl);
+
     wrap.appendChild(raioWrap);
 
     const strictRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer; color:#ccc; font-size:11px;");
@@ -10224,6 +10271,35 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         ? (s.combatActive ? "● Em combate: " + (s.currentTarget?.name || "?") : "● Rodando (sem alvo)")
         : "○ Parado";
       attackStatusEl.style.color = s.running ? (s.combatActive ? "#e77" : "#5c5") : "#999";
+    }
+
+    // ── Cave: contador do lure ──
+    const lureStatusEl = bodyEl.querySelector("[data-lure-status]");
+    if (lureStatusEl && bot.cave) {
+      try {
+        const cfg = bot.cave.config;
+        const raio = Math.min(8, Math.max(1, Math.trunc(Number(cfg.pauseRange) || 8)));
+        const minimo = Math.max(1, Math.trunc(Number(cfg.pauseMinMonstros) || 1));
+        const eu = bot.getPlayerPosition();
+        let qtd = 0;
+        if (eu) {
+          const monstros = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+          for (const mob of monstros) {
+            const pos = mob?.__position || mob?.getPosition?.();
+            if (!pos || Number(pos.z) !== Number(eu.z)) continue;
+            if (Math.max(Math.abs(pos.x - eu.x), Math.abs(pos.y - eu.y)) <= raio) qtd++;
+          }
+        }
+        const retomar = Math.max(0, Math.min(Math.trunc(Number(cfg.pauseResumeMonstros) || 0), minimo - 1));
+        const st = bot.cave.status?.() || {};
+        const pausado = !!st.pausadoPorMobs;
+        let txt;
+        if (!cfg.pauseUntilClear) txt = "pausa por mobs desligada";
+        else if (pausado) txt = "mobs: " + qtd + " — PAUSADO, volta com " + retomar + " ou menos";
+        else txt = "mobs: " + qtd + "/" + minimo + " — andando/puxando";
+        lureStatusEl.textContent = txt;
+        lureStatusEl.style.color = !cfg.pauseUntilClear ? "#999" : (pausado ? "#5c5" : "#fc5");
+      } catch { lureStatusEl.textContent = ""; }
     }
 
     // ── Magia em área ──
