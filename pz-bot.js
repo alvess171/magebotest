@@ -3596,6 +3596,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       waypointLookahead: 12,
       pauseUntilClear: true,
       pauseRange: 8,        // raio (sqm) pra considerar "monstro por perto"
+      pauseMonsterNames: [], // só estes contam (vazio = todos)
+      pauseIgnoreNames: [],  // estes NUNCA contam (tem prioridade)
+      usarListaAttack: false, // usar as listas da aba Attack em vez desta
       lureAtivo: false,       // liga o modo lure (juntar mobs andando)
       lureEsperarMobs: true,  // no lure, espera os bichos alcançarem
       lureDistanciaEspera: 3, // espera se o mais próximo passar disso (sqm)
@@ -3916,10 +3919,43 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return Number.isFinite(v) && v >= 1 ? Math.min(8, v) : 8;
   }
 
+  function normalizeNomes(lista) {
+    if (!Array.isArray(lista)) return [];
+    return lista.map((n) => String(n || "").trim().toLowerCase()).filter(Boolean);
+  }
+
+  function getNomeCriatura(c) {
+    return String(c?.name || c?.__name || c?.creatureName || "").trim().toLowerCase();
+  }
+
+  // Decide se o bicho conta pra pausa/lure. Sem isso, qualquer criatura
+  // na tela (inclusive as que você nem ataca) travava a rota.
+  function contaParaPausa(criatura) {
+    const nome = getNomeCriatura(criatura);
+
+    if (config.usarListaAttack) {
+      const alvos = normalizeNomes(bot.attack?.config?.targetNames);
+      const ignorados = normalizeNomes(bot.attack?.config?.ignoreNames);
+      if (nome && ignorados.includes(nome)) return false;
+      if (alvos.length) return !!nome && alvos.includes(nome);
+      return true;
+    }
+
+    // Ignorados têm prioridade: quem está aqui nunca conta, mesmo
+    // estando também na lista de permitidos.
+    const ignorados = normalizeNomes(config.pauseIgnoreNames);
+    if (nome && ignorados.includes(nome)) return false;
+
+    const permitidos = normalizeNomes(config.pauseMonsterNames);
+    if (!permitidos.length) return true;   // lista vazia = todos contam
+    return !!nome && permitidos.includes(nome);
+  }
+
   function getNearbyCreatures() {
-    // Pausa pra QUALQUER monstro visível, mas só dentro do raio configurado
+    // Só monstros dentro do raio configurado E que passem no filtro de nome
     // (o campo de visão do cliente é 8x6, então o máximo útil é 8).
-    const monstros = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+    const monstros = (bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [])
+      .filter(contaParaPausa);
     const eu = normalizePosition(bot.getPlayerPosition());
     if (!eu) return monstros;
     const raio = getPauseRange();
@@ -4993,6 +5029,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("proximitySkipEnabled" in nextConfig) nextConfig.proximitySkipEnabled = !!nextConfig.proximitySkipEnabled;
     if ("strictOrder" in nextConfig) nextConfig.strictOrder = !!nextConfig.strictOrder;
     if ("pauseRange" in nextConfig) nextConfig.pauseRange = Math.min(8, Math.max(1, Math.trunc(Number(nextConfig.pauseRange) || 8)));
+    if ("pauseMonsterNames" in nextConfig) nextConfig.pauseMonsterNames = Array.isArray(nextConfig.pauseMonsterNames) ? nextConfig.pauseMonsterNames.map((n) => String(n || "").trim()).filter(Boolean) : [];
+    if ("pauseIgnoreNames" in nextConfig) nextConfig.pauseIgnoreNames = Array.isArray(nextConfig.pauseIgnoreNames) ? nextConfig.pauseIgnoreNames.map((n) => String(n || "").trim()).filter(Boolean) : [];
+    if ("usarListaAttack" in nextConfig) nextConfig.usarListaAttack = !!nextConfig.usarListaAttack;
     if ("pauseMinMonstros" in nextConfig) nextConfig.pauseMinMonstros = Math.max(1, Math.trunc(Number(nextConfig.pauseMinMonstros) || 1));
     if ("pauseResumeMonstros" in nextConfig) nextConfig.pauseResumeMonstros = Math.max(0, Math.trunc(Number(nextConfig.pauseResumeMonstros) || 0));
     if ("pauseParaCombate" in nextConfig) nextConfig.pauseParaCombate = !!nextConfig.pauseParaCombate;
@@ -9207,6 +9246,113 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       bot.cave.updateConfig({ pauseRange: Number(v) || 8 });
     }, "number"));
     raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 a 8. Menor = só para quando o bicho já está colado; 8 = para com qualquer um na tela."));
+
+    // ── Quais monstros contam ──
+    const usarAttackRow = el("label", "display:flex; align-items:center; gap:6px; margin:6px 0 4px; cursor:pointer; color:#ccc; font-size:11px;");
+    const usarAttackCheckbox = el("input");
+    usarAttackCheckbox.type = "checkbox";
+    usarAttackCheckbox.checked = !!bot.cave.config.usarListaAttack;
+    usarAttackCheckbox.onchange = () => { bot.cave.updateConfig({ usarListaAttack: usarAttackCheckbox.checked }); renderBody(); };
+    usarAttackRow.appendChild(usarAttackCheckbox);
+    usarAttackRow.appendChild(document.createTextNode("↳ Usar as listas da aba Attack"));
+    raioWrap.appendChild(usarAttackRow);
+
+    if (!bot.cave.config.usarListaAttack) {
+      raioWrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 3px;", "↳ Só estes monstros contam (vazio = todos):"));
+      const caveNomesEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:4px; background:#111; border-radius:4px; padding:4px;");
+      raioWrap.appendChild(caveNomesEl);
+
+      function renderCaveNomes() {
+        caveNomesEl.innerHTML = "";
+        const lista = bot.cave.config.pauseMonsterNames || [];
+        if (!lista.length) {
+          caveNomesEl.appendChild(el("div", "color:#666; font-size:11px; font-style:italic;", "(todos os monstros contam)"));
+          return;
+        }
+        lista.forEach((nome) => {
+          const row = el("div", "display:flex; justify-content:space-between; align-items:center; padding:2px 0; font-size:11px;");
+          row.appendChild(el("span", null, nome));
+          const rm = el("span", "color:#e77; cursor:pointer; padding:0 4px;", "✕");
+          rm.onclick = () => {
+            bot.cave.updateConfig({ pauseMonsterNames: (bot.cave.config.pauseMonsterNames || []).filter((n) => n !== nome) });
+            renderCaveNomes();
+          };
+          row.appendChild(rm);
+          caveNomesEl.appendChild(row);
+        });
+      }
+      renderCaveNomes();
+
+      const caveNomeRow = el("div", "display:flex; gap:4px; margin-bottom:4px;");
+      const caveNomeInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+      caveNomeInput.placeholder = "nome do monstro";
+      function addCaveNome() {
+        const nome = caveNomeInput.value.trim();
+        if (!nome) return;
+        const atual = bot.cave.config.pauseMonsterNames || [];
+        if (!atual.some((n) => n.toLowerCase() === nome.toLowerCase())) {
+          bot.cave.updateConfig({ pauseMonsterNames: [...atual, nome] });
+        }
+        caveNomeInput.value = "";
+        renderCaveNomes();
+      }
+      const addCaveNomeBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#2d7a2d; color:#fff; cursor:pointer;", "+");
+      addCaveNomeBtn.onclick = addCaveNome;
+      caveNomeInput.onkeydown = (e) => { if (e.key === "Enter") addCaveNome(); };
+      caveNomeRow.appendChild(caveNomeInput);
+      caveNomeRow.appendChild(addCaveNomeBtn);
+      raioWrap.appendChild(caveNomeRow);
+      raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5; margin-bottom:6px;", "Vale pra pausa E pro lure: monstros fora da lista são ignorados na contagem."));
+
+      // ── Ignorar ──
+      raioWrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 3px;", "↳ Monstros a IGNORAR na contagem:"));
+      const caveIgnEl = el("div", "max-height:60px; overflow-y:auto; margin-bottom:4px; background:#111; border-radius:4px; padding:4px;");
+      raioWrap.appendChild(caveIgnEl);
+
+      function renderCaveIgn() {
+        caveIgnEl.innerHTML = "";
+        const lista = bot.cave.config.pauseIgnoreNames || [];
+        if (!lista.length) {
+          caveIgnEl.appendChild(el("div", "color:#666; font-size:11px; font-style:italic;", "(nenhum)"));
+          return;
+        }
+        lista.forEach((nome) => {
+          const row = el("div", "display:flex; justify-content:space-between; align-items:center; padding:2px 0; font-size:11px;");
+          row.appendChild(el("span", null, nome));
+          const rm = el("span", "color:#e77; cursor:pointer; padding:0 4px;", "✕");
+          rm.onclick = () => {
+            bot.cave.updateConfig({ pauseIgnoreNames: (bot.cave.config.pauseIgnoreNames || []).filter((n) => n !== nome) });
+            renderCaveIgn();
+          };
+          row.appendChild(rm);
+          caveIgnEl.appendChild(row);
+        });
+      }
+      renderCaveIgn();
+
+      const caveIgnRow = el("div", "display:flex; gap:4px; margin-bottom:4px;");
+      const caveIgnInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+      caveIgnInput.placeholder = "nome do monstro";
+      function addCaveIgn() {
+        const nome = caveIgnInput.value.trim();
+        if (!nome) return;
+        const atual = bot.cave.config.pauseIgnoreNames || [];
+        if (!atual.some((n) => n.toLowerCase() === nome.toLowerCase())) {
+          bot.cave.updateConfig({ pauseIgnoreNames: [...atual, nome] });
+        }
+        caveIgnInput.value = "";
+        renderCaveIgn();
+      }
+      const addCaveIgnBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#a33; color:#fff; cursor:pointer;", "+");
+      addCaveIgnBtn.onclick = addCaveIgn;
+      caveIgnInput.onkeydown = (e) => { if (e.key === "Enter") addCaveIgn(); };
+      caveIgnRow.appendChild(caveIgnInput);
+      caveIgnRow.appendChild(addCaveIgnBtn);
+      raioWrap.appendChild(caveIgnRow);
+      raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5; margin-bottom:4px;", "Tem prioridade sobre a lista de cima. Use pra ignorar bicho fraco que só atrapalha a contagem."));
+    } else {
+      raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5; margin-bottom:4px;", "Usando \"Monstros alvo\" e \"Monstros a IGNORAR\" da aba Attack."));
+    }
 
     const lureRow = el("label", "display:flex; align-items:center; gap:6px; margin:6px 0 4px; cursor:pointer; color:#ccc; font-size:11px; font-weight:bold;");
     const lureCheckbox = el("input");
