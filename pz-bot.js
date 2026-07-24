@@ -3581,6 +3581,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       waypointLookahead: 12,
       pauseUntilClear: true,
       pauseRange: 8,        // raio (sqm) pra considerar "monstro por perto"
+      lureAtivo: false,       // liga o modo lure (juntar mobs andando)
+      pauseParaCombate: true, // parar de andar enquanto estiver em combate
       pauseMinMonstros: 1,  // quantos mobs precisam estar perto pra pausar (lure)
       pauseResumeMonstros: 0, // volta a andar quando sobrar ESTE tanto ou menos
       pauseUntilSpawn: true,
@@ -3935,6 +3937,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // com o resto ainda em cima.
   function shouldPauseForCreatures() {
     if (!config.pauseUntilClear) { state.pausadoPorMobs = false; return false; }
+
+    // Sem o modo lure: comportamento clássico, para com qualquer bicho.
+    if (!config.lureAtivo) {
+      state.pausadoPorMobs = false;
+      return hasNearbyCreatures();
+    }
 
     const qtd = getNearbyCreatures().length;
     if (!state.pausadoPorMobs) {
@@ -4682,7 +4690,16 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const positionKey = getPositionKey(position);
       const now = Date.now();
       const attackStatus = bot.attack?.status?.() || null;
-      const shouldPauseForCombat = !!attackStatus?.combatActive && Number(attackStatus?.combatDurationMs || 0) < 60000;
+
+      // MODO LURE: com "pausar só com N mobs" (N > 1), a ideia é justamente
+      // andar APANHANDO até juntar o bando. Se a pausa por combate valesse
+      // aqui, o bot travaria no primeiro bicho e nunca lurava.
+      const emLure = !!config.lureAtivo && !!config.pauseUntilClear && !state.pausadoPorMobs;
+
+      const shouldPauseForCombat = !emLure
+        && config.pauseParaCombate !== false
+        && !!attackStatus?.combatActive
+        && Number(attackStatus?.combatDurationMs || 0) < 60000;
       if (shouldPauseForCombat) {
         if (!state.pausedForCombat) { state.pausedForCombat = true; bot.log("cave paused for auto attack", { combatDurationMs: Number(attackStatus?.combatDurationMs || 0), targetCount: Number(attackStatus?.targetCount || 0) }); }
         return;
@@ -4920,6 +4937,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("pauseRange" in nextConfig) nextConfig.pauseRange = Math.min(8, Math.max(1, Math.trunc(Number(nextConfig.pauseRange) || 8)));
     if ("pauseMinMonstros" in nextConfig) nextConfig.pauseMinMonstros = Math.max(1, Math.trunc(Number(nextConfig.pauseMinMonstros) || 1));
     if ("pauseResumeMonstros" in nextConfig) nextConfig.pauseResumeMonstros = Math.max(0, Math.trunc(Number(nextConfig.pauseResumeMonstros) || 0));
+    if ("pauseParaCombate" in nextConfig) nextConfig.pauseParaCombate = !!nextConfig.pauseParaCombate;
+    if ("lureAtivo" in nextConfig) nextConfig.lureAtivo = !!nextConfig.lureAtivo;
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
@@ -9091,6 +9110,16 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     }, "number"));
     raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "0 = só volta quando matar todos. 2 = volta quando sobrarem 2 ou menos. Precisa ser menor que o número de cima."));
 
+    const combateRow = el("label", "display:flex; align-items:center; gap:6px; margin-top:6px; cursor:pointer; color:#ccc; font-size:11px;");
+    const combateCheckbox = el("input");
+    combateCheckbox.type = "checkbox";
+    combateCheckbox.checked = bot.cave.config.pauseParaCombate !== false;
+    combateCheckbox.onchange = () => bot.cave.updateConfig({ pauseParaCombate: combateCheckbox.checked });
+    combateRow.appendChild(combateCheckbox);
+    combateRow.appendChild(document.createTextNode("Parar de andar durante combate"));
+    raioWrap.appendChild(combateRow);
+    raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "No modo lure (mobs > 1) isso é ignorado até juntar o bando — senão ele travaria no primeiro bicho e nunca lurava."));
+
     const lureStatusEl = el("div", "font-size:10px; margin-top:4px;");
     lureStatusEl.dataset.lureStatus = "1";
     raioWrap.appendChild(lureStatusEl);
@@ -10296,7 +10325,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         let txt;
         if (!cfg.pauseUntilClear) txt = "pausa por mobs desligada";
         else if (pausado) txt = "mobs: " + qtd + " — PAUSADO, volta com " + retomar + " ou menos";
-        else txt = "mobs: " + qtd + "/" + minimo + " — andando/puxando";
+        else txt = "mobs: " + qtd + "/" + minimo + (minimo > 1 ? " — 🎣 LURANDO (anda mesmo em combate)" : " — andando");
         lureStatusEl.textContent = txt;
         lureStatusEl.style.color = !cfg.pauseUntilClear ? "#999" : (pausado ? "#5c5" : "#fc5");
       } catch { lureStatusEl.textContent = ""; }
