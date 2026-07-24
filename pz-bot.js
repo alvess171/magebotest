@@ -2434,6 +2434,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       meleeFollow: true,   // false = ataca sem perseguir (fica parado)
       meleeNoFollowRange: 1, // alcance usado SÓ quando o follow está desligado
       meleeOrtogonal: false, // true = só N/S/L/O, nunca diagonal
+      ignoreNames: [],   // NUNCA atacar estes
       targetNames: [],
       skillTrainOnMonster: false,
       skillTrainRetargetMs: 50,
@@ -2442,6 +2443,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     storedConfig
   );
   config.targetNames = normalizeTargetNames(config.targetNames);
+  config.ignoreNames = normalizeTargetNames(config.ignoreNames);
   if (config.targetHotbarSlot == null && storedConfig.hotbarSlot != null) {
     config.targetHotbarSlot = storedConfig.hotbarSlot;
   }
@@ -2484,12 +2486,20 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function isAllowedTarget(creature) {
+    const name = getCreatureName(creature).toLowerCase();
+
+    // Lista de ignorados vem PRIMEIRO: quem está aqui nunca é atacado,
+    // mesmo que também esteja na lista de alvos.
+    const ignorados = normalizeTargetNames(config.ignoreNames);
+    if (name && ignorados.some((n) => n.toLowerCase() === name)) {
+      return false;
+    }
+
     const allowedNames = normalizeTargetNames(config.targetNames);
     if (!allowedNames.length) {
       return true;
     }
 
-    const name = getCreatureName(creature).toLowerCase();
     if (!name) {
       return false;
     }
@@ -3464,6 +3474,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       );
     }
 
+    if (Object.prototype.hasOwnProperty.call(nextConfig, "ignoreNames")) {
+      nextConfig.ignoreNames = normalizeTargetNames(nextConfig.ignoreNames);
+    }
+
     if (Object.prototype.hasOwnProperty.call(nextConfig, "targetNames")) {
       nextConfig.targetNames = normalizeTargetNames(nextConfig.targetNames);
     }
@@ -3563,6 +3577,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pausedForCombat: false,
     pausedForCreatures: false,
     pausadoPorMobs: false,  // histerese do lure
+    esperandoMobs: false,   // parado deixando os bichos alcançarem
     pausedForSpawn: false,
     delayUntil: 0,
     delayWaypointIndex: null,
@@ -3582,6 +3597,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pauseUntilClear: true,
       pauseRange: 8,        // raio (sqm) pra considerar "monstro por perto"
       lureAtivo: false,       // liga o modo lure (juntar mobs andando)
+      lureEsperarMobs: true,  // no lure, espera os bichos alcançarem
+      lureDistanciaEspera: 3, // espera se o mais próximo passar disso (sqm)
       pauseParaCombate: true, // parar de andar enquanto estiver em combate
       pauseMinMonstros: 1,  // quantos mobs precisam estar perto pra pausar (lure)
       pauseResumeMonstros: 0, // volta a andar quando sobrar ESTE tanto ou menos
@@ -3935,6 +3952,36 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   //   SÓ VOLTA a andar quando sobrar M ou menos
   // Sem isso ele voltaria a andar assim que matasse um único bicho,
   // com o resto ainda em cima.
+  function getLureDistanciaEspera() {
+    const v = Math.trunc(Number(config.lureDistanciaEspera));
+    return Number.isFinite(v) && v >= 1 ? Math.min(8, v) : 3;
+  }
+
+  // Personagem costuma ser mais rápido que o monstro. Sem isso ele anda
+  // a rota inteira e os bichos somem da tela — o lure nunca junta.
+  // Aqui ele para e deixa alcançarem antes de seguir.
+  function deveEsperarMobsAlcancarem() {
+    if (!config.lureAtivo || !config.lureEsperarMobs) return false;
+    if (state.pausadoPorMobs) return false; // já parou pra lutar
+
+    const eu = normalizePosition(bot.getPlayerPosition());
+    if (!eu) return false;
+
+    const monstros = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+    let maisPerto = Infinity;
+    for (const mob of monstros) {
+      const pos = normalizePosition(mob?.__position || mob?.getPosition?.());
+      if (!pos || Number(pos.z) !== Number(eu.z)) continue;
+      const d = Math.max(Math.abs(pos.x - eu.x), Math.abs(pos.y - eu.y));
+      if (d < maisPerto) maisPerto = d;
+    }
+
+    // Sem bicho nenhum: continua andando pra achar
+    if (!Number.isFinite(maisPerto)) return false;
+
+    return maisPerto > getLureDistanciaEspera();
+  }
+
   function shouldPauseForCreatures() {
     if (!config.pauseUntilClear) { state.pausadoPorMobs = false; return false; }
 
@@ -4710,6 +4757,16 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         return;
       }
       if (state.pausedForCreatures) { state.pausedForCreatures = false; bot.log("cave resumed after area clear"); }
+
+      // Espera os mobs alcançarem antes de continuar a rota
+      if (deveEsperarMobsAlcancarem()) {
+        if (!state.esperandoMobs) {
+          state.esperandoMobs = true;
+          bot.log("cave: esperando os mobs alcançarem (lure)");
+        }
+        return;
+      }
+      if (state.esperandoMobs) { state.esperandoMobs = false; bot.log("cave: mobs alcançaram, seguindo"); }
       let waypoint = getCurrentWaypoint();
       if (!waypoint) { stop(); return; }
       if (shouldPauseForSpawn(position, waypoint)) {
@@ -4915,6 +4972,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pausedForCombat: state.pausedForCombat,
       pausedForCreatures: state.pausedForCreatures,
       pausadoPorMobs: state.pausadoPorMobs,
+      esperandoMobs: state.esperandoMobs,
       pausedForSpawn: state.pausedForSpawn,
       nearbyCreatureCount: getNearbyCreatures().length,
       spawnFloorCreatureCount: getSpawnFloorMonsters(position).length,
@@ -4939,6 +4997,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if ("pauseResumeMonstros" in nextConfig) nextConfig.pauseResumeMonstros = Math.max(0, Math.trunc(Number(nextConfig.pauseResumeMonstros) || 0));
     if ("pauseParaCombate" in nextConfig) nextConfig.pauseParaCombate = !!nextConfig.pauseParaCombate;
     if ("lureAtivo" in nextConfig) nextConfig.lureAtivo = !!nextConfig.lureAtivo;
+    if ("lureEsperarMobs" in nextConfig) nextConfig.lureEsperarMobs = !!nextConfig.lureEsperarMobs;
+    if ("lureDistanciaEspera" in nextConfig) nextConfig.lureDistanciaEspera = Math.min(8, Math.max(1, Math.trunc(Number(nextConfig.lureDistanciaEspera) || 3)));
     Object.assign(config, nextConfig);
     persistConfig();
     bot.log("cave config updated", { ...config });
@@ -8826,6 +8886,54 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     nameRow.appendChild(addNameBtn);
     wrap.appendChild(nameRow);
 
+    // ── Monstros a IGNORAR ──
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin-bottom:3px;", "Monstros a IGNORAR (nunca atacar):"));
+    const ignoreListEl = el("div", "max-height:70px; overflow-y:auto; margin-bottom:6px; background:#111; border-radius:4px; padding:4px;");
+    wrap.appendChild(ignoreListEl);
+
+    function renderIgnoreList() {
+      ignoreListEl.innerHTML = "";
+      const lista = bot.attack.config.ignoreNames || [];
+      if (!lista.length) {
+        ignoreListEl.appendChild(el("div", "color:#666; font-size:11px; font-style:italic;", "(nenhum)"));
+        return;
+      }
+      lista.forEach((nome) => {
+        const row = el("div", "display:flex; justify-content:space-between; align-items:center; padding:2px 0; font-size:11px;");
+        row.appendChild(el("span", null, nome));
+        const rm = el("span", "color:#e77; cursor:pointer; padding:0 4px;", "✕");
+        rm.onclick = () => {
+          bot.attack.updateConfig({ ignoreNames: (bot.attack.config.ignoreNames || []).filter((n) => n !== nome) });
+          renderIgnoreList();
+        };
+        row.appendChild(rm);
+        ignoreListEl.appendChild(row);
+      });
+    }
+    renderIgnoreList();
+
+    const ignoreRow = el("div", "display:flex; gap:4px; margin-bottom:4px;");
+    const ignoreInput = el("input", "flex:1; padding:4px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#eee;");
+    ignoreInput.placeholder = "nome do monstro";
+    function addIgnoreName() {
+      const nome = ignoreInput.value.trim();
+      if (!nome) return;
+      const atual = bot.attack.config.ignoreNames || [];
+      if (!atual.some((n) => n.toLowerCase() === nome.toLowerCase())) {
+        bot.attack.updateConfig({ ignoreNames: [...atual, nome] });
+      }
+      ignoreInput.value = "";
+      renderIgnoreList();
+    }
+    const addIgnoreBtn = el("button", "padding:4px 10px; border:none; border-radius:4px; background:#a33; color:#fff; cursor:pointer;", "+");
+    addIgnoreBtn.onclick = addIgnoreName;
+    ignoreInput.onkeydown = (e) => { if (e.key === "Enter") addIgnoreName(); };
+    ignoreRow.appendChild(ignoreInput);
+    ignoreRow.appendChild(addIgnoreBtn);
+    wrap.appendChild(ignoreRow);
+
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:8px; line-height:1.5;", "Tem prioridade sobre a lista de cima: quem estiver aqui nunca é atacado, mesmo constando como alvo."));
+
     wrap.appendChild(makeField("Distância máxima (tiles)", bot.attack.config.maxTargetDistance ?? 6, (v) => { bot.attack.updateConfig({ maxTargetDistance: Number(v) || 6 }); }, "number"));
 
     wrap.appendChild(makeField("Hotkey pra selecionar alvo (0 = nenhuma)", bot.attack.config.targetHotbarSlot ?? 0, (v) => {
@@ -9113,6 +9221,20 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       bot.cave.updateConfig({ pauseMinMonstros: Number(v) || 1 });
     }, "number"));
     raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 = para com qualquer bicho. Maior = ele SEGUE andando puxando mob até juntar essa quantidade, e só então para pra lutar."));
+
+    const esperarRow = el("label", "display:flex; align-items:center; gap:6px; margin:4px 0; cursor:pointer; color:#ccc; font-size:11px;");
+    const esperarCheckbox = el("input");
+    esperarCheckbox.type = "checkbox";
+    esperarCheckbox.checked = bot.cave.config.lureEsperarMobs !== false;
+    esperarCheckbox.onchange = () => bot.cave.updateConfig({ lureEsperarMobs: esperarCheckbox.checked });
+    esperarRow.appendChild(esperarCheckbox);
+    esperarRow.appendChild(document.createTextNode("↳ Esperar os mobs alcançarem"));
+    raioWrap.appendChild(esperarRow);
+
+    raioWrap.appendChild(makeField("↳ Esperar se ficarem além de (sqm)", bot.cave.config.lureDistanciaEspera ?? 3, (v) => {
+      bot.cave.updateConfig({ lureDistanciaEspera: Number(v) || 3 });
+    }, "number"));
+    raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "Seu personagem costuma ser mais rápido que o bicho. Isso faz ele parar e deixar alcançarem, em vez de sumir da tela deles."));
 
     raioWrap.appendChild(makeField("↳ Voltar a andar com quantos sobrando", bot.cave.config.pauseResumeMonstros ?? 0, (v) => {
       bot.cave.updateConfig({ pauseResumeMonstros: Number(v) || 0 });
@@ -10334,7 +10456,8 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         let txt;
         if (!cfg.pauseUntilClear) txt = "pausa por mobs desligada";
         else if (pausado) txt = "mobs: " + qtd + " — PAUSADO, volta com " + retomar + " ou menos";
-        else if (cfg.lureAtivo) txt = "mobs: " + qtd + "/" + minimo + " — 🎣 LURANDO (anda mesmo em combate)";
+        else if (cfg.lureAtivo && st.esperandoMobs) txt = "mobs: " + qtd + "/" + minimo + " — ⏸ esperando alcançarem";
+        else if (cfg.lureAtivo) txt = "mobs: " + qtd + "/" + minimo + " — 🎣 LURANDO";
         else txt = "mobs: " + qtd + " — modo normal (para com qualquer um)";
         lureStatusEl.textContent = txt;
         lureStatusEl.style.color = !cfg.pauseUntilClear ? "#999" : (pausado ? "#5c5" : "#fc5");
