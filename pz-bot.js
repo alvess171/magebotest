@@ -1229,6 +1229,92 @@
   })();
 
   // ===== MÓDULO: ATTACK HOTKEY CASTER (aperta hotkey com delay enquanto o Attack está em combate) =====
+
+  // ===== MÓDULO: MAGIA EM ÁREA (dispara quando tem X mobs perto) =====
+  const AoeSpellCaster = (() => {
+    const KEY = "aoeSpellCaster.config";
+    const state = { running: false, timerId: null, lastCastAt: 0, ultimaContagem: 0 };
+    const config = Object.assign(
+      {
+        hotbarSlot: 2,
+        minMonstros: 3,   // quantos mobs precisam estar perto
+        raio: 1,          // distância (sqm) pra contar como "perto"
+        cooldownMs: 3000,
+        soEmCombate: true, // só dispara se estiver atacando alguém
+        enabled: false,
+      },
+      bot.storage.get(KEY, {})
+    );
+
+    function persist() { bot.storage.set(KEY, { ...config }); }
+
+    function normalizeSlot(slot) {
+      const n = Math.trunc(Number(slot));
+      return Number.isFinite(n) && n >= 1 && n <= 12 ? n : null;
+    }
+
+    // Conta monstros dentro do raio (distância de Chebyshev: quadrado ao redor)
+    function contarMonstrosPerto() {
+      try {
+        const eu = bot.getPlayerPosition();
+        if (!eu) return 0;
+        const raio = Math.max(1, Math.min(8, Math.trunc(Number(config.raio) || 1)));
+        const monstros = bot.xray?.getVisibleMonsters?.({ sameFloorOnly: true }) || [];
+        let n = 0;
+        for (const m of monstros) {
+          const p = m?.__position || m?.getPosition?.();
+          if (!p || Number(p.z) !== Number(eu.z)) continue;
+          const d = Math.max(Math.abs(Number(p.x) - Number(eu.x)), Math.abs(Number(p.y) - Number(eu.y)));
+          if (d <= raio) n++;
+        }
+        return n;
+      } catch { return 0; }
+    }
+
+    function emCombate() {
+      try { return !!bot.attack?.isCombatActive?.(); } catch { return false; }
+    }
+
+    function tick() {
+      if (!state.running) return;
+      try {
+        const now = Date.now();
+        const slot = normalizeSlot(config.hotbarSlot);
+        const qtd = contarMonstrosPerto();
+        state.ultimaContagem = qtd;
+
+        const minimo = Math.max(1, Math.trunc(Number(config.minMonstros) || 1));
+        const cd = Math.max(200, Number(config.cooldownMs) || 3000);
+        const combateOk = !config.soEmCombate || emCombate();
+
+        if (slot && combateOk && qtd >= minimo && now - state.lastCastAt >= cd) {
+          if (bot.clickHotbar(slot - 1)) {
+            state.lastCastAt = now;
+            log("magia em área disparada", { slot, monstros: qtd, minimo });
+          }
+        }
+      } catch (e) { log("aoe caster tick failed", e?.message); }
+      updatePanel();
+      state.timerId = window.setTimeout(tick, 300);
+    }
+
+    function start() {
+      if (state.running) return;
+      state.running = true; config.enabled = true; persist(); tick();
+    }
+    function stop() {
+      state.running = false; config.enabled = false; persist();
+      if (state.timerId != null) { clearTimeout(state.timerId); state.timerId = null; }
+      updatePanel();
+    }
+
+    return {
+      config, start, stop, contarMonstrosPerto,
+      get ultimaContagem() { return state.ultimaContagem; },
+      get running() { return state.running; },
+    };
+  })();
+
   const AttackSpellCaster = (() => {
     const KEY = "attackHotkeyCaster.config";
     const state = { running: false, timerId: null, lastCastAt: 0 };
@@ -8784,6 +8870,51 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     casterStatusEl.dataset.casterStatus = "1";
     wrap.appendChild(casterStatusEl);
 
+    // ── Magia em área ──
+    wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:10px 0 4px; border-top:1px solid #333; padding-top:8px;", "💥 Magia em área (quando juntar mob):"));
+
+    const aoeStatusEl = el("div", "font-size:10px; margin-bottom:6px;");
+    aoeStatusEl.dataset.aoeStatus = "1";
+    wrap.appendChild(aoeStatusEl);
+
+    const aoeRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer; color:#ccc; font-size:11px;");
+    const aoeCheckbox = el("input");
+    aoeCheckbox.type = "checkbox";
+    aoeCheckbox.checked = !!AoeSpellCaster.running;
+    aoeCheckbox.onchange = () => { aoeCheckbox.checked ? AoeSpellCaster.start() : AoeSpellCaster.stop(); };
+    aoeRow.appendChild(aoeCheckbox);
+    aoeRow.appendChild(document.createTextNode("Ativar"));
+    wrap.appendChild(aoeRow);
+
+    function salvarAoe() { bot.storage.set("aoeSpellCaster.config", { ...AoeSpellCaster.config }); updatePanel(); }
+
+    wrap.appendChild(makeField("Slot da hotkey", AoeSpellCaster.config.hotbarSlot, (v) => {
+      AoeSpellCaster.config.hotbarSlot = Math.max(0, Math.trunc(Number(v) || 0)); salvarAoe();
+    }, "number"));
+
+    wrap.appendChild(makeField("Disparar com quantos mobs", AoeSpellCaster.config.minMonstros, (v) => {
+      AoeSpellCaster.config.minMonstros = Math.max(1, Math.trunc(Number(v) || 1)); salvarAoe();
+    }, "number"));
+
+    wrap.appendChild(makeField("Contar mobs até (sqm)", AoeSpellCaster.config.raio, (v) => {
+      AoeSpellCaster.config.raio = Math.min(8, Math.max(1, Math.trunc(Number(v) || 1))); salvarAoe();
+    }, "number"));
+
+    wrap.appendChild(makeField("Cooldown (ms)", AoeSpellCaster.config.cooldownMs, (v) => {
+      AoeSpellCaster.config.cooldownMs = Math.max(200, Number(v) || 3000); salvarAoe();
+    }, "number"));
+
+    const aoeCombateRow = el("label", "display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer; color:#ccc; font-size:11px;");
+    const aoeCombateCheckbox = el("input");
+    aoeCombateCheckbox.type = "checkbox";
+    aoeCombateCheckbox.checked = !!AoeSpellCaster.config.soEmCombate;
+    aoeCombateCheckbox.onchange = () => { AoeSpellCaster.config.soEmCombate = aoeCombateCheckbox.checked; salvarAoe(); };
+    aoeCombateRow.appendChild(aoeCombateCheckbox);
+    aoeCombateRow.appendChild(document.createTextNode("Só disparar em combate"));
+    wrap.appendChild(aoeCombateRow);
+
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin-bottom:6px; line-height:1.5;", "Raio 1 = só os 8 tiles colados em você. Aumente se a magia tiver alcance maior."));
+
     const toggleBtn = el("button", "width:100%; padding:6px; border:none; border-radius:4px; cursor:pointer; font-weight:bold; color:#fff; margin-top:6px;");
     function refreshToggle() {
       const running = bot.attack.status().running;
@@ -10118,6 +10249,21 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       attackStatusEl.style.color = s.running ? (s.combatActive ? "#e77" : "#5c5") : "#999";
     }
 
+    // ── Magia em área ──
+    const aoeStatusEl = bodyEl.querySelector("[data-aoe-status]");
+    if (aoeStatusEl) {
+      if (!AoeSpellCaster.running) {
+        aoeStatusEl.textContent = "○ desligada";
+        aoeStatusEl.style.color = "#999";
+      } else {
+        const qtd = AoeSpellCaster.ultimaContagem;
+        const min = Number(AoeSpellCaster.config.minMonstros) || 1;
+        const pronto = qtd >= min;
+        aoeStatusEl.textContent = "● mobs perto: " + qtd + "/" + min + (pronto ? " — disparando" : " — aguardando");
+        aoeStatusEl.style.color = pronto ? "#5c5" : "#fc5";
+      }
+    }
+
     // ── Hotkey de ataque (posição) ──
     const casterStatusEl = bodyEl.querySelector("[data-caster-status]");
     if (casterStatusEl) {
@@ -10549,7 +10695,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
       ["Attack", bot.attack], ["Cave", bot.cave], ["Drop", bot.drop],
       ["UhPlayer", bot.uhPlayer], ["ChatDetector", bot.Chatdetector],
       ["RingCap", bot.autoRingByCap], ["AutoStack", bot.autostack],
-      ["AutoReconnect", AutoReconnect],
+      ["AutoReconnect", AutoReconnect], ["AoeSpellCaster", AoeSpellCaster],
       ["PerformanceMode", PerformanceMode], ["HideSpellAnimations", HideSpellAnimations],
       ["ZoomBlocker", ZoomBlocker], ["SwipeNavBlocker", SwipeNavBlocker],
       // Talk fica de fora de propósito — só liga pelo botão
@@ -10634,7 +10780,7 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     Rune, Haste, Eat, Ring, Monk, Stones, Panic,
     Heal, Invisible, MagicShield, Follow, FriendHeal, LastTarget, Profiles,
     Attack: bot.attack, Cave: bot.cave, GmPanic: bot.panic, Drop: bot.drop, Pz: bot.pz,
-    UhPlayer: bot.uhPlayer, AttackSpellCaster,
+    UhPlayer: bot.uhPlayer, AttackSpellCaster, AoeSpellCaster,
     RingCap: bot.autoRingByCap, AutoStack: bot.autostack,
     AutoReconnect,
     Chatdetector: bot.Chatdetector, HazardStepper, PzReturner,
