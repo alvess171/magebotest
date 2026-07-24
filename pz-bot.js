@@ -9100,6 +9100,15 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
     }, "number"));
     raioWrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; line-height:1.5;", "1 a 8. Menor = só para quando o bicho já está colado; 8 = para com qualquer um na tela."));
 
+    const lureRow = el("label", "display:flex; align-items:center; gap:6px; margin:6px 0 4px; cursor:pointer; color:#ccc; font-size:11px; font-weight:bold;");
+    const lureCheckbox = el("input");
+    lureCheckbox.type = "checkbox";
+    lureCheckbox.checked = !!bot.cave.config.lureAtivo;
+    lureCheckbox.onchange = () => { bot.cave.updateConfig({ lureAtivo: lureCheckbox.checked }); renderBody(); };
+    lureRow.appendChild(lureCheckbox);
+    lureRow.appendChild(document.createTextNode("🎣 Modo lure (juntar mobs andando)"));
+    raioWrap.appendChild(lureRow);
+
     raioWrap.appendChild(makeField("↳ Pausar só com quantos mobs (lure)", bot.cave.config.pauseMinMonstros ?? 1, (v) => {
       bot.cave.updateConfig({ pauseMinMonstros: Number(v) || 1 });
     }, "number"));
@@ -10325,7 +10334,8 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         let txt;
         if (!cfg.pauseUntilClear) txt = "pausa por mobs desligada";
         else if (pausado) txt = "mobs: " + qtd + " — PAUSADO, volta com " + retomar + " ou menos";
-        else txt = "mobs: " + qtd + "/" + minimo + (minimo > 1 ? " — 🎣 LURANDO (anda mesmo em combate)" : " — andando");
+        else if (cfg.lureAtivo) txt = "mobs: " + qtd + "/" + minimo + " — 🎣 LURANDO (anda mesmo em combate)";
+        else txt = "mobs: " + qtd + " — modo normal (para com qualquer um)";
         lureStatusEl.textContent = txt;
         lureStatusEl.style.color = !cfg.pauseUntilClear ? "#999" : (pausado ? "#5c5" : "#fc5");
       } catch { lureStatusEl.textContent = ""; }
