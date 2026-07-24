@@ -835,9 +835,19 @@
       resolvePending(stats, now);
       if (state.pendingHpAttempt1 || state.pendingHpAttempt2 || state.pendingManaAttempt) return false;
       const hpPct = getHpPct(stats), manaPct = getManaPct(stats);
+
+      // ZONA DE EMERGÊNCIA (abaixo do limite do nível 2): a cura forte
+      // manda sozinha. Se ela estiver em cooldown, ESPERA — não gasta a
+      // fraca aqui, que é o que fazia o heal parecer "errado".
       if (hpPct != null && hpPct < Number(config.hpThreshold2)) {
-        if (triggerHeal(config.hpHotbarSlot2, now, stats, "pendingHpAttempt2", "lastHpHeal2At", "lastHpAttempt2At")) return true;
+        const slot2 = normalizeSlot(config.hpHotbarSlot2);
+        if (slot2) {
+          triggerHeal(config.hpHotbarSlot2, now, stats, "pendingHpAttempt2", "lastHpHeal2At", "lastHpAttempt2At");
+          return true; // bloqueia nível 1 e mana enquanto estiver aqui
+        }
+        // Nível 2 desligado (slot 0): deixa o nível 1 assumir
       }
+
       if (hpPct != null && hpPct < Number(config.hpThreshold1)) {
         if (triggerHeal(config.hpHotbarSlot1, now, stats, "pendingHpAttempt1", "lastHpHeal1At", "lastHpAttempt1At")) return true;
       }
@@ -8412,16 +8422,38 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
 
   function buildHealTab() {
     const wrap = el("div");
+
+    // Leitor ao vivo: mostra o que o bot está enxergando agora
+    const leituraEl = el("div", "font-size:11px; margin-bottom:6px; padding:4px; background:#111; border-radius:4px;");
+    leituraEl.dataset.healLeitura = "1";
+    wrap.appendChild(leituraEl);
+
+    // Salva de verdade a cada mudança (antes só ficava na memória
+    // e sumia ao recarregar).
+    function pct(valor, padrao) {
+      const n = Number(valor);
+      if (!Number.isFinite(n)) return padrao;
+      return Math.min(100, Math.max(0, Math.trunc(n)));
+    }
+    function salvar() { bot.storage.set("heal.config", { ...Heal.config }); updatePanel(); }
+
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 2px;", "HP nível 2 (forte, prioridade alta):"));
-    wrap.appendChild(makeField("Limite HP (%)", Heal.config.hpThreshold2, (v) => { Heal.config.hpThreshold2 = Math.min(100, Math.max(0, Number(v) || 60)); }, "number"));
-    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot2, (v) => { Heal.config.hpHotbarSlot2 = Math.max(0, Math.trunc(Number(v) || 0)); }, "number"));
+    wrap.appendChild(makeField("Limite HP (%)", Heal.config.hpThreshold2, (v) => { Heal.config.hpThreshold2 = pct(v, 60); salvar(); }, "number"));
+    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot2, (v) => { Heal.config.hpHotbarSlot2 = Math.max(0, Math.trunc(Number(v) || 0)); salvar(); }, "number"));
+
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 2px;", "HP nível 1 (fraco):"));
-    wrap.appendChild(makeField("Limite HP (%)", Heal.config.hpThreshold1, (v) => { Heal.config.hpThreshold1 = Math.min(100, Math.max(0, Number(v) || 90)); }, "number"));
-    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot1, (v) => { Heal.config.hpHotbarSlot1 = Math.max(0, Math.trunc(Number(v) || 0)); }, "number"));
+    wrap.appendChild(makeField("Limite HP (%)", Heal.config.hpThreshold1, (v) => { Heal.config.hpThreshold1 = pct(v, 90); salvar(); }, "number"));
+    wrap.appendChild(makeField("Slot hotbar", Heal.config.hpHotbarSlot1, (v) => { Heal.config.hpHotbarSlot1 = Math.max(0, Math.trunc(Number(v) || 0)); salvar(); }, "number"));
+
+    const avisoOrdemEl = el("div", "font-size:10px; margin:2px 0 6px;");
+    avisoOrdemEl.dataset.healAviso = "1";
+    wrap.appendChild(avisoOrdemEl);
+
     wrap.appendChild(el("div", "color:#ccc; font-size:11px; margin:4px 0 2px;", "Mana:"));
-    wrap.appendChild(makeField("Limite mana (%)", Heal.config.manaThreshold, (v) => { Heal.config.manaThreshold = Math.min(100, Math.max(0, Number(v) || 50)); }, "number"));
-    wrap.appendChild(makeField("Slot hotbar", Heal.config.manaHotbarSlot, (v) => { Heal.config.manaHotbarSlot = Math.max(0, Math.trunc(Number(v) || 0)); }, "number"));
-    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:6px 0;", "Slot 0 = desligado. Se a cura não fizer efeito 5x seguidas (poção acabou, slot errado), ele pausa 20s em vez de ficar apertando a tecla sem parar."));
+    wrap.appendChild(makeField("Limite mana (%)", Heal.config.manaThreshold, (v) => { Heal.config.manaThreshold = pct(v, 50); salvar(); }, "number"));
+    wrap.appendChild(makeField("Slot hotbar", Heal.config.manaHotbarSlot, (v) => { Heal.config.manaHotbarSlot = Math.max(0, Math.trunc(Number(v) || 0)); salvar(); }, "number"));
+
+    wrap.appendChild(el("div", "color:#666; font-size:10px; font-style:italic; margin:6px 0; line-height:1.5;", "Abaixo do limite do nível 2 é ZONA DE EMERGÊNCIA: só a cura forte age ali. Se ela estiver em cooldown, ele espera em vez de gastar a fraca. Por isso o limite do nível 2 deve ser MENOR que o do nível 1. Slot 0 = desliga aquele nível."));
     wrap.appendChild(makeToggleButton(Heal, "Heal"));
     return wrap;
   }
@@ -10256,6 +10288,40 @@ window.__minibiaBotBundle.installautostackModule = function installautostackModu
         " — bag " + ((Number(s.config.targetBagIndex) || 0) + 1) +
         " | juntadas: " + s.merged;
       stackStatusEl.style.color = s.running ? "#5c5" : "#999";
+    }
+
+    // ── Heal: leitura ao vivo ──
+    const healLeituraEl = bodyEl.querySelector("[data-heal-leitura]");
+    if (healLeituraEl) {
+      const snap = bot.getPlayerSnapshot();
+      if (!snap || !snap.maxHealth) {
+        healLeituraEl.textContent = "⚠ não consigo ler HP/mana";
+        healLeituraEl.style.color = "#e77";
+      } else {
+        const hp = (snap.health / snap.maxHealth) * 100;
+        const mp = snap.maxMana ? (snap.mana / snap.maxMana) * 100 : 0;
+        const t2 = Number(Heal.config.hpThreshold2), t1 = Number(Heal.config.hpThreshold1);
+        let acao = "nada (HP ok)";
+        if (hp < t2 && Number(Heal.config.hpHotbarSlot2) >= 1) acao = "🔴 EMERGÊNCIA — só nível 2 (slot " + Heal.config.hpHotbarSlot2 + ")";
+        else if (hp < t1) acao = "nível 1 → slot " + Heal.config.hpHotbarSlot1;
+        else if (snap.maxMana && mp < Number(Heal.config.manaThreshold)) acao = "mana → slot " + Heal.config.manaHotbarSlot;
+        healLeituraEl.textContent =
+          "HP " + snap.health + "/" + snap.maxHealth + " (" + hp.toFixed(1) + "%)" +
+          " | MP " + mp.toFixed(0) + "%\nAgora usaria: " + acao;
+        healLeituraEl.style.whiteSpace = "pre-line";
+        healLeituraEl.style.color = "#9c9";
+      }
+    }
+
+    const healAvisoEl = bodyEl.querySelector("[data-heal-aviso]");
+    if (healAvisoEl) {
+      const t2 = Number(Heal.config.hpThreshold2), t1 = Number(Heal.config.hpThreshold1);
+      if (t2 >= t1) {
+        healAvisoEl.textContent = "⚠ Nível 2 (" + t2 + "%) está >= nível 1 (" + t1 + "%) — o nível 1 nunca vai ser usado.";
+        healAvisoEl.style.color = "#fc5";
+      } else {
+        healAvisoEl.textContent = "";
+      }
     }
 
     // ── Reconn ──
