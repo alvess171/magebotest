@@ -749,10 +749,6 @@
       lastHpHeal1At: 0, lastHpHeal2At: 0, lastManaHealAt: 0,
       lastHpAttempt1At: 0, lastHpAttempt2At: 0, lastManaAttemptAt: 0,
       pendingHpAttempt1: null, pendingHpAttempt2: null, pendingManaAttempt: null,
-      // Conta tentativas que não surtiram efeito (poção acabou, slot errado).
-      // Sem isso o módulo fica apertando a mesma tecla pra sempre.
-      falhas: { pendingHpAttempt1: 0, pendingHpAttempt2: 0, pendingManaAttempt: 0 },
-      pausaAte: { pendingHpAttempt1: 0, pendingHpAttempt2: 0, pendingManaAttempt: 0 },
     };
     const config = Object.assign(
       {
@@ -781,44 +777,25 @@
     function didHpHeal(stats, a) { return stats?.hp && a && stats.hp.current > a.hpBefore; }
     function didManaHeal(stats, a) { return stats?.mana && a && stats.mana.current > a.manaBefore; }
 
-    const MAX_FALHAS = 5;        // tentativas seguidas sem efeito
-    const PAUSA_MS = 20000;      // quanto tempo descansa depois disso
-
-    function registrarSucesso(chave) {
-      state.falhas[chave] = 0;
-      state.pausaAte[chave] = 0;
-    }
-
-    function registrarFalha(chave, now) {
-      state.falhas[chave] = (state.falhas[chave] || 0) + 1;
-      if (state.falhas[chave] >= MAX_FALHAS) {
-        state.pausaAte[chave] = now + PAUSA_MS;
-        state.falhas[chave] = 0;
-        log("heal: " + chave + " sem efeito " + MAX_FALHAS + "x seguidas — pausando " +
-            (PAUSA_MS / 1000) + "s (poção acabou? slot errado?)");
-      }
-    }
-
     function resolvePending(stats, now) {
       const cw = Math.max(50, Number(config.healConfirmMs) || 0);
       if (state.pendingHpAttempt2) {
-        if (didHpHeal(stats, state.pendingHpAttempt2)) { state.lastHpHeal2At = state.pendingHpAttempt2.attemptedAt; state.pendingHpAttempt2 = null; registrarSucesso("pendingHpAttempt2"); }
-        else if (now - state.pendingHpAttempt2.attemptedAt >= cw) { state.pendingHpAttempt2 = null; registrarFalha("pendingHpAttempt2", now); }
+        if (didHpHeal(stats, state.pendingHpAttempt2)) { state.lastHpHeal2At = state.pendingHpAttempt2.attemptedAt; state.pendingHpAttempt2 = null; }
+        else if (now - state.pendingHpAttempt2.attemptedAt >= cw) { state.pendingHpAttempt2 = null; }
       }
       if (state.pendingHpAttempt1) {
-        if (didHpHeal(stats, state.pendingHpAttempt1)) { state.lastHpHeal1At = state.pendingHpAttempt1.attemptedAt; state.pendingHpAttempt1 = null; registrarSucesso("pendingHpAttempt1"); }
-        else if (now - state.pendingHpAttempt1.attemptedAt >= cw) { state.pendingHpAttempt1 = null; registrarFalha("pendingHpAttempt1", now); }
+        if (didHpHeal(stats, state.pendingHpAttempt1)) { state.lastHpHeal1At = state.pendingHpAttempt1.attemptedAt; state.pendingHpAttempt1 = null; }
+        else if (now - state.pendingHpAttempt1.attemptedAt >= cw) { state.pendingHpAttempt1 = null; }
       }
       if (state.pendingManaAttempt) {
-        if (didManaHeal(stats, state.pendingManaAttempt)) { state.lastManaHealAt = state.pendingManaAttempt.attemptedAt; state.pendingManaAttempt = null; registrarSucesso("pendingManaAttempt"); }
-        else if (now - state.pendingManaAttempt.attemptedAt >= cw) { state.pendingManaAttempt = null; registrarFalha("pendingManaAttempt", now); }
+        if (didManaHeal(stats, state.pendingManaAttempt)) { state.lastManaHealAt = state.pendingManaAttempt.attemptedAt; state.pendingManaAttempt = null; }
+        else if (now - state.pendingManaAttempt.attemptedAt >= cw) { state.pendingManaAttempt = null; }
       }
     }
 
     function triggerHeal(slot, now, stats, pendingKey, lastHealKey, lastAttemptKey) {
       const s = normalizeSlot(slot);
       if (!s || state[pendingKey]) return false;
-      if (now < (state.pausaAte[pendingKey] || 0)) return false; // em descanso
       if (now - state[lastHealKey] < config.healCooldownMs) return false;
       if (now - state[lastAttemptKey] < Math.max(50, Number(config.healRetryMs) || 0)) return false;
       const clicked = bot.clickHotbar(s - 1);
